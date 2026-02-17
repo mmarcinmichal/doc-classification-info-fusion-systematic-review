@@ -1,0 +1,4904 @@
+---
+title: 'Analysis of Multi-view and Multi-modal Classification Approaches: Qualitative analysis'
+author: "Marcin Mirończuk (<marcin.mironczuk@opi.org.pl>)"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+    bookdown::html_document2:
+    self_contained: true
+    number_sections: true
+    toc: true
+    toc_depth: 5
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+bibliography: ./bibtex-information-fusion-document-classification.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+## Loading main setting
+
+The code below prepares an analysis environment and set-up all required libraries and functions for further analysis.
+
+```{r settings, echo = T,  message = FALSE}
+options(warn = -1)
+
+options(encoding = "UTF-8")
+
+# Clear workspace
+rm(list = ls())
+
+# Set language to En
+Sys.setlocale(category = "LC_ALL", locale = "english")
+
+# Installing and loading libraries
+libraries <- c("bib2df",
+               "dplyr",
+               "ggplot2",
+               "gridExtra",
+               "grid",
+               "kableExtra",
+               "readxl",
+               "tidyr", 
+               "treemapify",
+               "scales",
+               "cowplot",
+               "colorspace")
+
+if (length(setdiff(libraries, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(libraries, rownames(installed.packages())), dependencies = T)
+}
+
+sapply(libraries, function(libName) {
+  library(libName, character.only = TRUE)
+})
+
+# Information about session
+sessionInfo()
+```
+
+```{r functions, echo = T,  message = FALSE}
+# Function to clean and read BibTeX file
+load_bibliography <- function(bib_file) {
+  # Read and clean the BibTeX file
+  lines <- base::readLines(bib_file, warn = FALSE)  # Suppress warnings
+  lines <- base::gsub("[^[:print:]]", "", lines)  # Remove non-printable characters
+  
+  # Write cleaned lines to a temporary file
+  temp_file <- base::tempfile(fileext = ".bib")
+  base::writeLines(lines, temp_file)
+  
+  # Read the cleaned BibTeX file
+  bib_df <- tryCatch(
+    bib2df::bib2df(temp_file),
+    error = function(e) {
+      base::message("Error reading BibTeX file: ", e$message)
+      return(NULL)
+    }
+  )
+  
+  if (is.null(bib_df))
+    return(NULL)
+  
+  return(bib_df)
+}
+environment(load_bibliography) <- new.env(parent = baseenv())
+
+create_bib_summary <- function(bib_df) {
+  library(dplyr)
+  
+  # Explicitly import the pipe operator
+  `%>%` <- dplyr::`%>%`
+  
+  # Extract required columns (ENTRYTYPE and YEAR)
+  bib_summary <- bib_df %>%
+    dplyr::mutate(
+      entry_type = base::tolower(CATEGORY),
+      # Get the entry type
+      year = as.numeric(YEAR),
+      # Ensure the year is numeric
+      journal = JOURNAL
+    ) %>%
+    dplyr::filter(!is.na(year))               # Remove entries with missing year
+  
+  return(bib_summary)
+}
+environment(create_bib_summary) <- new.env(parent = baseenv())
+
+plot_publication_distribution <- function(bib_summary) {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Check for valid data
+  if (is.null(bib_summary) || nrow(bib_summary) == 0) {
+    base::message("No valid data to plot.")
+    return(NULL)
+  }
+  
+  # Build distribution and labels
+  type_distribution <- bib_summary %>%
+    dplyr::count(entry_type) %>%
+    dplyr::mutate(
+      prop       = n / base::sum(n) * 100,
+      label      = base::paste0(entry_type, "\n", n, " (", base::round(prop, 1), "%)"),
+      entry_type = base::as.character(entry_type)
+    )
+  
+  # Create a consistent color palette
+  global_palette <- stats::setNames(
+    grDevices::colorRampPalette(ggsci::pal_jco("default")(3))(nrow(type_distribution)),
+    type_distribution$entry_type
+  )
+  
+  base_color <- global_palette[1]
+  
+  # Create the bar chart of total publications per year with a uniform blue fill
+  trend_plot <- ggplot2::ggplot(bib_summary, ggplot2::aes(x = year)) +
+    ggplot2::geom_bar(fill = base_color, color = "white") +
+    ggplot2::labs(title = "", x     = "Publication Year", y     = "Number of Publications") +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      axis.text.x     = ggplot2::element_text(angle = 45, hjust = 1),
+      plot.title      = ggplot2::element_text(
+        hjust = 0.5,
+        size = 14,
+        face = "plain"
+      )
+    )
+  
+  
+  # Pie chart with the same palette
+  pie_chart <- ggplot2::ggplot(type_distribution,
+                               ggplot2::aes(x = "", y = prop, fill = entry_type)) +
+    ggplot2::geom_col(width = 1, color = "white") +
+    ggplot2::coord_polar(theta = "y") +
+    ggplot2::scale_fill_manual(values = global_palette, drop = TRUE, name = "Group") +
+    ggplot2::theme_void() +
+    ggrepel::geom_label_repel(
+      ggplot2::aes(label = label),
+      position     = ggplot2::position_stack(vjust = 0.5),
+      size         = 4,
+      show.legend  = FALSE,
+      segment.color = "grey50"
+    ) +
+    ggplot2::theme(legend.position = "bottom")
+  
+  # Title grob Publication Trends and Type Proportions
+  title_grob <- grid::textGrob(
+    "",
+    gp = grid::gpar(fontsize = 14, fontface = "plain")
+  )
+  
+  # Combine plots
+  combined_plot <- gridExtra::grid.arrange(
+    title_grob,
+    gridExtra::arrangeGrob(trend_plot, pie_chart, ncol = 2),
+    ncol   = 1,
+    heights = c(0.1, 1)
+  )
+  
+  return(combined_plot)
+}
+# Isolate environment to avoid masking
+environment(plot_publication_distribution) <- baseenv()
+
+# Function to aggregate articles by category and journal
+aggregate_by_journal <- function(bib_summary) {
+  library(dplyr)
+  
+  # Explicitly import the pipe operator
+  `%>%` <- dplyr::`%>%`
+  
+  journal_aggregation <- bib_summary %>%
+    dplyr::group_by(entry_type, journal) %>%
+    dplyr::summarise(article_count = dplyr::n(), .groups = 'drop') %>%
+    dplyr::arrange(desc(article_count))
+  
+  return(journal_aggregation)
+}
+environment(aggregate_by_journal) <- new.env(parent = baseenv())
+
+create_pie_chart <- function(summary_df,
+                             title = "",
+                             subtitle = "",
+                             global_palette) {
+  # Pie chart with the same palette
+  pie_chart <- ggplot2::ggplot(summary_df, ggplot2::aes(x = "", y = percentage, fill = group)) +
+    ggplot2::geom_col(width = 1, color = "white") +
+    ggplot2::coord_polar(theta = "y") +
+    ggplot2::scale_fill_manual(
+      values = global_palette,
+      drop = TRUE,
+      guide = ggplot2::guide_legend(title = "Group")
+    ) +
+    ggplot2::labs(title = title, subtitle = subtitle) +
+    ggplot2::theme_void() +
+    ggrepel::geom_label_repel(
+      ggplot2::aes(label = label),
+      position     = ggplot2::position_stack(vjust = 0.5),
+      size         = 4,
+      show.legend  = FALSE,
+      segment.color = "grey50"
+    ) +
+    ggplot2::theme(
+      plot.title      = ggplot2::element_text(hjust = 0.5, size = 14, face = "plain"),
+      plot.subtitle = ggplot2::element_text(hjust = 0.5),
+      legend.position    = "right",
+      legend.direction   = "vertical",
+      legend.title       = ggplot2::element_text(face = "plain"),
+      legend.text        = ggplot2::element_text(size = 10)
+    )
+  
+  return(pie_chart)
+}
+environment(create_pie_chart) <- new.env(parent = baseenv())
+
+create_treemap_chart <- function(summary_df,
+                                 title = "",
+                                 subtitle = "",
+                                 global_palette,
+                                 text_size = 11,
+                                 text_color = "white",
+                                 show_values = TRUE,
+                                 value_var = "count",
+                                 label_var = "label",
+                                 group_var = "group",
+                                 sort_by = "count",
+                                 sort_desc = TRUE) {
+  # Require necessary packages
+  if (!requireNamespace("treemapify", quietly = TRUE)) {
+    stop("Package 'treemapify' is needed for this function. Please install it.")
+  }
+  
+  # Sort the data based on specified column
+  if (sort_by %in% names(summary_df)) {
+    summary_df <- summary_df[order(summary_df[[sort_by]], decreasing = sort_desc), ]
+    
+    # Convert group to factor with levels in the sorted order to maintain sorting
+    summary_df[[group_var]] <- factor(summary_df[[group_var]], levels = unique(summary_df[[group_var]]))
+  }
+  
+  # Create the treemap
+  treemap_chart <- ggplot2::ggplot(summary_df,
+                                   ggplot2::aes(
+                                     area = .data[[value_var]],
+                                     fill = .data[[group_var]],
+                                     label = if (show_values)
+                                       .data[[label_var]]
+                                     else
+                                       .data[[group_var]]
+                                   )) +
+    treemapify::geom_treemap() +
+    treemapify::geom_treemap_text(
+      colour = text_color,
+      place = "centre",
+      size = text_size,
+      fontface = "bold"
+    ) +
+    ggplot2::scale_fill_manual(
+      values = global_palette,
+      drop = TRUE,
+      guide = ggplot2::guide_legend(title = "Group")
+    ) +
+    ggplot2::labs(title = title, subtitle = subtitle) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      legend.position = "right",
+      legend.direction = "vertical",
+      legend.title = ggplot2::element_text(face = "plain"),
+      legend.text = ggplot2::element_text(size = 10),
+      plot.title = ggplot2::element_text(
+        size = 14,
+        face = "plain",
+        hjust = 0.5
+      ),
+      plot.subtitle = ggplot2::element_text(size = 12, hjust = 0.5)
+    )
+  
+  return(treemap_chart)
+}
+environment(create_treemap_chart) <- new.env(parent = baseenv())
+
+create_chartexpo_radial <- function(data_df,
+                                    category_var,
+                                    value_var,
+                                    label_var = NULL,
+                                    title = "",
+                                    subtitle = "",
+                                    color_palette = c("#4472C4",
+                                                      "#ED7D31",
+                                                      "#A5A5A5",
+                                                      "#FFC000",
+                                                      "#5B9BD5",
+                                                      "#70AD47"),
+                                    max_value = NULL,
+                                    show_labels = TRUE,
+                                    show_legend = TRUE) {
+  # Ensure the data is properly sorted for radial display
+  data_df <- data_df[order(data_df[[category_var]]), ]
+  
+  # Set maximum value for consistent scaling
+  if (is.null(max_value)) {
+    max_value <- max(data_df[[value_var]]) * 1.1  # Add 10% buffer
+  }
+  
+  # Calculate positions and prepare data
+  n_categories <- nrow(data_df)
+  data_df$id <- 1:n_categories
+  data_df$angle <- 2 * pi * (data_df$id - 1) / n_categories
+  
+  # Assign colors
+  if (length(color_palette) < n_categories) {
+    color_palette <- rep_len(color_palette, n_categories)
+  }
+  data_df$color <- color_palette[1:n_categories]
+  
+  # Create the base plot
+  radial_plot <- ggplot2::ggplot(data_df) +
+    # Add background grid circles
+    ggplot2::geom_hline(
+      yintercept = seq(0, max_value, length.out = 5),
+      color = "gray90",
+      size = 0.5
+    ) +
+    # Add background grid lines
+    ggplot2::geom_vline(
+      xintercept = seq(0, 2 * pi, length.out = n_categories + 1)[1:n_categories],
+      color = "gray90",
+      size = 0.5
+    ) +
+    # Add the radial bars
+    ggplot2::geom_col(
+      ggplot2::aes(x = angle, y = .data[[value_var]], fill = .data[[category_var]]),
+      width = 2 * pi / (n_categories * 1.5),
+      alpha = 0.85
+    ) +
+    # Add points at the end of each bar
+    ggplot2::geom_point(ggplot2::aes(x = angle, y = .data[[value_var]], color = .data[[category_var]]), size = 3) +
+    # Add value labels outside the bars
+    ggplot2::geom_text(
+      ggplot2::aes(
+        x = angle,
+        y = .data[[value_var]] * 1.15,
+        # Position outside the bar
+        label = if (!is.null(label_var))
+          .data[[label_var]]
+        else
+          .data[[value_var]],
+      ),
+      hjust = 0.5,
+      vjust = 0.5,
+      size = 4,
+      # Increased font size
+      fontface = "bold",
+      color = "black"
+    ) +
+    # Add category labels if requested
+    {
+      if (show_labels)
+        ggplot2::geom_text(
+          ggplot2::aes(
+            x = angle,
+            y = max_value * 1.3,
+            # Moved further out for more space
+            label = .data[[category_var]]
+          ),
+          hjust = 0.5,
+          vjust = 0.5,
+          size = 4.5,
+          # Increased font size
+          fontface = "bold"
+        )
+    } +
+    # Configure the polar coordinates
+    ggplot2::coord_polar() +
+    # Set custom colors
+    ggplot2::scale_fill_manual(values = color_palette) +
+    ggplot2::scale_color_manual(values = color_palette) +
+    # Set limits - increased to accommodate the labels
+    ggplot2::ylim(0, max_value * 1.4) +
+    # Add titles
+    ggplot2::labs(title = title, subtitle = subtitle) +
+    # Theme customization to match ChartExpo style
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      axis.text = ggplot2::element_blank(),
+      axis.title = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      panel.grid = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(
+        size = 14,
+        face = "plain",
+        hjust = 0.5
+      ),
+      plot.subtitle = ggplot2::element_text(size = 12, hjust = 0.5),
+      legend.position = if (show_legend)
+        "bottom"
+      else
+        "none",
+      legend.title = ggplot2::element_blank(),
+      plot.margin = ggplot2::unit(c(1, 1, 1, 1), "cm")
+    )
+  
+  return(radial_plot)
+}
+environment(create_chartexpo_radial) <- new.env(parent = baseenv())
+
+create_bubble_plot <- function(summary_df,
+                               title = "",
+                               subtitle = "",
+                               global_palette) {
+  bubble_plot <- ggplot2::ggplot(summary_df,
+                                 ggplot2::aes(
+                                   x = YEAR,
+                                   y = group,
+                                   size = n,
+                                   fill = group
+                                 )) +
+    ggplot2::geom_point(shape = 21,
+                        color = "white",
+                        alpha = 0.8) +
+    # explicitly request a size legend, and give it point glyphs
+    ggplot2::scale_size_area(
+      max_size = 15,
+      guide = ggplot2::guide_legend(
+        title        = "Count",
+        override.aes = base::list(
+          shape = 21,
+          fill  = "grey70",
+          # or some neutral colour
+          color = "white",
+          # match your points
+          alpha = 0.8
+        )
+      )
+    ) +
+    ggplot2::scale_fill_manual(values = global_palette,
+                               guide = ggplot2::guide_legend(title = "Group")) +
+    ggplot2::labs(x = "Year", y = NULL) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1),
+      panel.grid.major.y = ggplot2::element_blank(),
+      legend.position    = "right",
+      legend.direction   = "vertical",
+      legend.title       = ggplot2::element_text(
+        face = "plain",
+        hjust = 0.5
+      ),
+      legend.text        = ggplot2::element_text(size = 10)
+    )
+  
+  return(bubble_plot)
+  
+}
+environment(create_bubble_plot) <- new.env(parent = baseenv())
+
+create_summary_df <- function(df, column_name) {
+  library(dplyr)
+  
+  # Explicitly import the pipe operator
+  `%>%` <- dplyr::`%>%`
+  
+  df %>%
+    dplyr::count(!!dplyr::sym(column_name)) %>%
+    dplyr::mutate(
+      percentage = base::round(n / base::sum(n) * 100, 1),
+      label = base::paste0(n, " (", percentage, "%)"),
+      column = column_name  # Add column name for faceting
+    )  %>% dplyr::rename_with( ~ "group", 1) %>% dplyr::rename_with( ~ "count", 2)
+}
+environment(create_summary_df) <- new.env(parent = baseenv())
+
+create_bubble_df <- function(year_df, references_categories) {
+
+  # Create a new dataframe for the bubble plot
+  bubble_df <- base::data.frame(bibtexkey = base::character(),
+                          group = base::character(),
+                          stringsAsFactors = FALSE)
+  
+  # Loop through the references_categories list to extract bibtexkeys and their categories
+  for (category in base::names(references_categories)) {
+    keys <- references_categories[[category]]
+    # Split in case there are multiple keys in one string (comma separated)
+    keys <- base::unlist(base::strsplit(keys, ",\\s*"))
+    
+    # Create temporary dataframe for this category
+    temp_df <- base::data.frame(
+      bibtexkey = keys,
+      group = category,
+      stringsAsFactors = FALSE
+    )
+    
+    # Append to the main dataframe
+    bubble_df <- base::rbind(bubble_df, temp_df)
+  }
+  
+  # Merge with original dataframe to get the YEAR
+  bubble_df <- base::merge(bubble_df, year_df[, c("bibtexkey", "YEAR")], by = "bibtexkey", all.x = TRUE)
+  
+  has_any_na <- any(is.na(bubble_df$YEAR))
+  
+  if (has_any_na) {
+    stop("Error: NA values found in the 'YEAR' column.")
+  }
+  
+  # Count bibtexkeys by group and year
+  summary_df <- stats::aggregate(bibtexkey ~ group + YEAR, data = bubble_df, FUN = length)
+  base::names(summary_df)[3] <- "n"
+  
+  # If there are any NA values in YEAR, remove them
+  summary_df <- summary_df[!base::is.na(summary_df$YEAR), ]
+  
+  # Sort summary_df by group and YEAR
+  summary_df <- summary_df[base::order(summary_df$group, summary_df$YEAR), ]
+  
+  # Make sure YEAR is numeric
+  summary_df$YEAR <-base::as.numeric(summary_df$YEAR)
+  
+  return(summary_df)
+}
+environment(create_bubble_df) <- new.env(parent = baseenv())
+```
+
+# Checking a bibliography and generating basic statistics
+Loading bibliographies.
+
+```{r biblioChecking}
+bib_file <- "bibtex-information-fusion-document-classification.bib"
+bib_df <- load_bibliography(bib_file)
+head(bib_df)
+```
+
+```{r loadData}
+excel_file <- "2-articles-information-fusion-summarisation-cleaned.xlsx"
+excel_df <- readxl::read_excel(excel_file, sheet = 1)
+excel_df <- excel_df %>%
+  filter(rowSums(!is.na(.)) > 0)
+head(excel_df)
+```
+
+```{r dataChecking}
+table(unique(sort(excel_df$bibtexkey)) == unique(sort(bib_df$BIBTEXKEY)))
+```
+
+```{r biblioSourceDist}
+bib_summary <- create_bib_summary(bib_df)
+plotPubDist <- plot_publication_distribution(bib_summary)
+ggsave(
+  "fig-year-and-publication-type-pie-bar.pdf",
+  plot = plotPubDist,
+  width = 14,
+  height = 8
+)
+```
+
+```{r biblioJournal}
+journal_aggregation <- aggregate_by_journal(bib_summary)
+knitr::kable(journal_aggregation, caption = "Publication type") %>% kableExtra::kable_styling()
+```
+
+```{r analysissetup}
+# Define the vectors
+# Multimodal
+MULTIMOAL_BIBTEXKEY <- c(
+  "ma2021",
+  "xianfang2024",
+  "reil2023",
+  "fujinumay2023",
+  "hessel2020",
+  "bakkalis2023",
+  "chenz2023",
+  "zouh2023",
+  "chenl2022",
+  "gallo2021",
+  "anget2018",
+  "rajendran2016",
+  "ghorbanali2024",
+  "jiangs2024",
+  "liub2024",
+  "liut2024",
+  "ronghaop2024",
+  "tengfeil2024",
+  "yushili2024",
+  "zhangy2024",
+  "arlqaraleshs2024",
+  "guod2023",
+  "jarquin2023",
+  "jarrahia2023",
+  "kenny2023",
+  "liangz2023",
+  "linckere2023",
+  "luzdearau2023",
+  "ortizperez2023",
+  "rasheeda2023",
+  "shah2023",
+  "dacosta2022",
+  "dongpin2022",
+  "kanchid2022",
+  "paraskevopoulos2022",
+  "sapeao2022",
+  "wangq2022",
+  "garg2021",
+  "guelorget2021",
+  "setiawan2021",
+  "wang2021",
+  "zingaro2021",
+  "braz2020",
+  "debreuij2020",
+  "zhu2020",
+  "jainr2019",
+  "ravikiranm2019",
+  "matricm2018",
+  "tellez2018",
+  "schmittm2017",
+  "cristanim2014",
+  "liparas2014",
+  "perezgraciat2010",
+  "zhangx2010",
+  "chens2009",
+  "chos2023",
+  "adwaithd2022",
+  "wajdm2024",
+  "kozienkop2023",
+  "carmona2020",
+  "argon2018",
+  "guptad2018",
+  "guq2022",
+  "chatziagapia2022",
+  "yuet2022",
+  "akhiamov2018",
+  "akhtiamovo2017",
+  "andriyanovn2022",
+  "jiangs2024",
+  "anget2018"
+)
+
+# Multiview
+MULTIVIEW_BIBTEXKEY <- c(
+  "brefeldu2015",
+  "aminim2009",
+  "liy2013",
+  "zhangqi2024",
+  "doinychko2020",
+  "samya2023",
+  "sangy2022",
+  "jiax2021",
+  "liang2021",
+  "sus2021",
+  "yangp2014",
+  "maf2020",
+  "max2020",
+  "wangh2020",
+  "bhatt2019",
+  "chens2019",
+  "hoylea2019",
+  "wangh2019",
+  "ferreira2018",
+  "zhup2018",
+  "zhanz2017",
+  "xux2016",
+  "perinaa2013",
+  "zhangb2013",
+  "zhangd2013",
+  "guyo2012",
+  "kovesim2012",
+  "yangp2012",
+  "zhengw2011",
+  "chenb2009",
+  "zhangx2009",
+  "zhangb2008",
+  "fengz2024",
+  "jiz2024",
+  "xuy2024",
+  "varmanp2023",
+  "zhao2023",
+  "cgoncalves2022",
+  "liuj2022",
+  "luox2022",
+  "gui2021",
+  "huc2021",
+  "liuw2021",
+  "mmironczuk2020",
+  "mmironczuk2019",
+  "pengj2018",
+  "huz2017",
+  "sinorar2016",
+  "xuh2016",
+  "fakri2015",
+  "liuj2014",
+  "longg2013",
+  "lig2012",
+  "aminim2010",
+  "aminim2010b",
+  "suns2010",
+  "zhangx2010b",
+  "suns2008",
+  "matsubara2005",
+  "dasigiv2001",
+  "graffm2023",
+  "tianl2023",
+  "karisanip2022",
+  "lij2020",
+  "zhang2021",
+  "carmona2020",
+  "rajendran2016",
+  "liaox2015",
+  "gup2009",
+  "akhtiamov2019",
+  "yangp2014",
+  "hey2019",
+  "xuc2017",
+  "iglesias2016"
+)
+# Bibtex
+ALL_BIBTEXKEY <- c(
+  "dacosta2022",
+  "gallo2021",
+  "gui2021",
+  "huc2021",
+  "garg2021",
+  "ma2021",
+  "zingaro2021",
+  "zhang2021",
+  "wang2021",
+  "liang2021",
+  "guelorget2021",
+  "sus2021",
+  "zhao2023",
+  "lij2020",
+  "jiax2021",
+  "maf2020",
+  "max2020",
+  "setiawan2021",
+  "braz2020",
+  "debreuij2020",
+  "hessel2020",
+  "doinychko2020",
+  "carmona2020",
+  "zhu2020",
+  "bhatt2019",
+  "hey2019",
+  "wangh2020",
+  "jainr2019",
+  "ravikiranm2019",
+  "mmironczuk2019",
+  "chens2019",
+  "wangh2019",
+  "hoylea2019",
+  "akhtiamov2019",
+  "anget2018",
+  "mmironczuk2020",
+  "zhup2018",
+  "matricm2018",
+  "tellez2018",
+  "akhiamov2018",
+  "guptad2018",
+  "ferreira2018",
+  "argon2018",
+  "pengj2018",
+  "xuc2017",
+  "schmittm2017",
+  "zhanz2017",
+  "akhtiamovo2017",
+  "huz2017",
+  "xuh2016",
+  "sinorar2016",
+  "xux2016",
+  "rajendran2016",
+  "iglesias2016",
+  "fakri2015",
+  "brefeldu2015",
+  "liaox2015",
+  "liparas2014",
+  "liuj2014",
+  "cristanim2014",
+  "zhangd2013",
+  "longg2013",
+  "perinaa2013",
+  "liy2013",
+  "zhangb2013",
+  "lig2012",
+  "yangp2012",
+  "kovesim2012",
+  "guyo2012",
+  "zhengw2011",
+  "zhangx2010",
+  "perezgraciat2010",
+  "aminim2010b",
+  "suns2010",
+  "zhangx2010b",
+  "aminim2010",
+  "chens2009",
+  "aminim2009",
+  "chenb2009",
+  "zhangx2009",
+  "gup2009",
+  "suns2008",
+  "zhangb2008",
+  "matsubara2005",
+  "dasigiv2001",
+  "ronghaop2024",
+  "tengfeil2024",
+  "liub2024",
+  "zhangy2024",
+  "xianfang2024",
+  "zhangqi2024",
+  "yushili2024",
+  "ghorbanali2024",
+  "jiz2024",
+  "xuy2024",
+  "fengz2024",
+  "wajdm2024",
+  "bakkalis2023",
+  "zouh2023",
+  "chenz2023",
+  "luzdearau2023",
+  "jarquin2023",
+  "linckere2023",
+  "kenny2023",
+  "tianl2023",
+  "varmanp2023",
+  "graffm2023",
+  "kozienkop2023",
+  "liangz2023",
+  "jarrahia2023",
+  "samya2023",
+  "liut2024",
+  "rasheeda2023",
+  "shah2023",
+  "fujinumay2023",
+  "chos2023",
+  "ortizperez2023",
+  "chenl2022",
+  "dongpin2022",
+  "guq2022",
+  "yuet2022",
+  "karisanip2022",
+  "reil2023",
+  "arlqaraleshs2024",
+  "sapeao2022",
+  "paraskevopoulos2022",
+  "sangy2022",
+  "liuj2022",
+  "adwaithd2022",
+  "kanchid2022",
+  "luox2022",
+  "jiangs2024",
+  "wangq2022",
+  "andriyanovn2022",
+  "chatziagapia2022",
+  "cgoncalves2022",
+  "guod2023",
+  "liuw2021",
+  "yangp2014"
+)
+```
+
+```{r comp1}
+# Print basic information
+unique(c(MULTIMOAL_BIBTEXKEY, MULTIVIEW_BIBTEXKEY))
+length(unique(c(
+  MULTIMOAL_BIBTEXKEY, MULTIVIEW_BIBTEXKEY
+))) == length(ALL_BIBTEXKEY)
+```
+
+```{r comp2}
+setdiff(unique(c(
+  MULTIMOAL_BIBTEXKEY, MULTIVIEW_BIBTEXKEY
+)), ALL_BIBTEXKEY)
+```
+
+```{r comp3}
+setdiff(ALL_BIBTEXKEY, unique(c(
+  MULTIMOAL_BIBTEXKEY, MULTIVIEW_BIBTEXKEY
+)))
+```
+
+```{r comp4}
+names(table(unique(sort(excel_df$bibtexkey)))) == unique(sort(ALL_BIBTEXKEY))
+```
+
+```{r 1}
+GG_PLOTS <- c()
+```
+
+```{r 2}
+# Count papers in each group
+multimodal_count <- length(unique(MULTIMOAL_BIBTEXKEY))
+multiview_count <- length(unique(MULTIVIEW_BIBTEXKEY))
+
+# Count papers in both categories (overlap)
+papers_in_both <- length(intersect(MULTIMOAL_BIBTEXKEY, MULTIVIEW_BIBTEXKEY))
+
+# Count papers exclusive to each group
+multimodal_only <- multimodal_count - papers_in_both
+multiview_only <- multiview_count - papers_in_both
+
+
+# Define the short categories
+categories <- c("multimodal", "multiview", "both")
+
+# Create a data frame for the pie chart
+paper_counts <- data.frame(
+  group = c("multimodal", "multiview", "both"),
+  count = c(multimodal_only, multiview_only, papers_in_both)
+)
+
+# Calculate percentages
+paper_counts <- paper_counts %>%
+  mutate(
+    percentage = round(count / sum(count) * 100, 1),
+    label = paste0(count, " (", percentage, "%)"),
+    group   = factor(group, levels = categories)
+  )
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(3))(3),
+                                  categories)
+
+# Create pie chart with ggplot2
+ggplot_chart <- create_pie_chart(
+  paper_counts,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette
+)
+GG_PLOTS <- append(GG_PLOTS, ggplot_chart)
+
+ggsave(
+  "fig-mm-mv-both-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+```
+
+```{r 3}
+ggplot_chart
+```
+
+```{r 4}
+knitr::kable(paper_counts, caption = "Paper Distribution by Category") %>% kableExtra::kable_styling()
+```
+
+```{r 5}
+year_group_counts <- excel_df %>%
+  mutate(bibtexkey = tolower(bibtexkey)) %>%
+  inner_join(
+    bib_df %>% mutate(BIBTEXKEY = tolower(BIBTEXKEY)) %>% select('BIBTEXKEY', 'YEAR'),
+    by = c("bibtexkey" = "BIBTEXKEY")
+  ) %>%
+  mutate(
+    in_mm = bibtexkey %in% tolower(MULTIMOAL_BIBTEXKEY),
+    in_mv = bibtexkey %in% tolower(MULTIVIEW_BIBTEXKEY),
+    group = case_when(
+      in_mm & !in_mv ~ "multimodal",
+      in_mv & !in_mm ~ "multiview",
+      in_mm & in_mv  ~ "both",
+      TRUE           ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(group)) %>%
+  count(YEAR, group, name = "n") %>%
+  mutate(group = factor(group, levels = categories))
+
+bubble_plot <- create_bubble_plot(
+  year_group_counts,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette
+)
+
+GG_PLOTS <- append(GG_PLOTS, bubble_plot)
+```
+
+```{r 6}
+paste("Multimodal pappers: ", sum(year_group_counts$n[year_group_counts$group == "multimodal"]))
+paste("Multiview pappers: ", sum(year_group_counts$n[year_group_counts$group == "multiview"]))
+```
+
+```{r 7}
+overlap_keys <- intersect(MULTIMOAL_BIBTEXKEY, MULTIVIEW_BIBTEXKEY)
+print(overlap_keys)
+```
+
+```{r 8}
+bubble_plot
+```
+
+```{r 9}
+# 1. Wrap the title at ~60 characters per line
+# Pie chart of the distribution of works on multimodal and multi-view learning (left chart) and the distribution of the number of these works by year (right figure)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+# 2. Create a centered title grob
+title_grob <- grid::textGrob(
+  wrapped_title,
+  gp = grid::gpar(fontsize = 12, fontface = "plain"),
+  just = "center"  # center align
+)
+
+# 3. Draw: give a bit more room to the title (e.g. 1:10 height ratio)
+combined_plot <- gridExtra::grid.arrange(
+  title_grob,
+  gridExtra::arrangeGrob(ggplot_chart, bubble_plot, ncol = 2),
+  ncol   = 1,
+  heights = c(1, 10)
+)
+
+ggsave(
+  "fig-mm-mv-both-pie-bubble.pdf",
+  plot = combined_plot,
+  width = 14,
+  height = 8
+)
+```
+
+# Multimodal reserch papper analysis
+
+```{r 10}
+multimodal_df <- excel_df %>%
+  filter(bibtexkey %in% MULTIMOAL_BIBTEXKEY)
+
+head(multimodal_df)
+```
+
+```{r 11}
+paste("Extracted", nrow(multimodal_df), "multimodal papers out of", nrow(excel_df), "total papers")
+```
+
+## Topics
+
+```{r 12}
+year_multimodal_df <- multimodal_df %>%
+  mutate(bibtexkey = tolower(bibtexkey)) %>%
+  inner_join(
+    bib_df %>% mutate(BIBTEXKEY = tolower(BIBTEXKEY)) %>% select('BIBTEXKEY', 'YEAR'),
+    by = c("bibtexkey" = "BIBTEXKEY")
+  )
+```
+
+### General Framework
+
+```{r 1212431}
+general_framework <- list()
+general_framework[['When to use multi-modal learning']] <-	c('ma2021')
+general_framework[['Feature selection as a multi-modal optimization problem']] <-	c('xianfang2024')
+general_framework[['Handling missing views or modalities']] <-	c('reil2023')
+general_framework[['Evaluating multi-modal model performance']] <-	c('fujinumay2023, hessel2020') 
+general_framework[['Multimodal representation learning']] <-	c('chenz2023, zouh2023, gallo2021, rajendran2016')
+
+summary_df <- create_bubble_df(year_multimodal_df, general_framework)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(5))(5),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "General Framework",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 122332}
+bubble_plot
+```
+
+```{r 523412421}
+knitr::kable(summary_df, caption = "General Framework") %>% kableExtra::kable_styling()
+```
+
+```{r 53214511}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 123}
+ggplot_chart
+```
+
+```{r 23523511}
+knitr::kable(unpacked_summary_df, caption = "General Framework") %>% kableExtra::kable_styling()
+```
+
+```{r 909835478}
+# 1. Wrap the title at ~60 characters per line
+# Treemap of the Distribution of Works on Multimodal–General Framework (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-gen-frem-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Task
+
+```{r 13}
+tasks <- list()
+tasks[['Finance']] <- c('chos2023')
+tasks[['Healthcare']] <- c('chenz2023, ortizperez2023, braz2020')
+tasks[['Disaster response/managment']] <- c('arlqaraleshs2024, adwaithd2022, dacosta2022, debreuij2020')
+tasks[['Air traffic control']] <- c('guod2023')
+tasks[['Cultural heritage']] <- c('reil2023, perezgraciat2010')
+tasks[['Education']] <- c('linckere2023, sapeao2022')
+tasks[['E-commerce']] <- c('wajdm2024, chenl2022')
+tasks[['Industrial fault diagnosis']] <- c('dongpin2022')
+tasks[['Social Network']] <- c('shah2023')
+tasks[['Social media analysis']] <- c('yushili2024, jarquin2023, kozienkop2023, guelorget2021, carmona2020, argon2018, guptad2018')
+tasks[['Fake news detection']] <- c('jarrahia2023, liangz2023')
+tasks[['Hate speech and offensive language detection']] <- c('kozienkop2023, guq2022')
+tasks[['Emotion recognition']] <- c('ronghaop2024, kenny2023, wang2021, schmittm2017')
+tasks[['Author profiling']] <- c('carmona2020, argon2018, matricm2018, tellez2018, cristanim2014')
+tasks[['Document image classification']] <- c('jiangs2024, bakkalis2023, chos2023, fujinumay2023, luzdearau2023, rasheeda2023, kanchid2022, garg2021, zingaro2021, jainr2019')
+#tasks[['Video classification']] <- c('')
+tasks[['Speaker role identification']] <- c('guod2023')
+tasks[['Sentiment analysis']] <- c('ghorbanali2024, liub2024, zhangy2024, setiawan2021, anget2018')
+tasks[['Filled Pause Detection']] <- c('chatziagapia2022')
+tasks[['Safety-Report Observations']] <- c('paraskevopoulos2022')
+tasks[['Malware Text Classification']] <- c('ravikiranm2019')
+tasks[['Research paper classification']] <- c('liut2024, yuet2022')
+tasks[['Web document classification']] <- c('ma2021, liparas2014, zhangx2010')
+
+summary_df <- create_bubble_df(year_multimodal_df, tasks)
+
+base <- ggsci::pal_jco("default")(10)
+extra <- c(lighten(base, 0.3), darken(base, 0.2))
+palette_23 <- c(base, extra)[1:23]
+global_palette <- stats::setNames(palette_23, unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Tasks",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 14}
+bubble_plot
+```
+
+```{r 15}
+knitr::kable(summary_df, caption = "Tasks") %>% kableExtra::kable_styling()
+```
+
+```{r 16}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 17}
+ggplot_chart
+```
+
+```{r 18}
+knitr::kable(unpacked_summary_df, caption = "Tasks") %>% kableExtra::kable_styling()
+```
+
+```{r 19}
+# 1. Wrap the title at ~60 characters per line
+# Treemap of the Distribution of Works on Multimodal–Task (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-task-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Data Modalities
+
+```{r 20}
+data_modalities <- list()
+data_modalities[["Text + Image"]] <-	c('ghorbanali2024, liub2024, liut2024, tengfeil2024, wajdm2024, yushili2024, zhangy2024, arlqaraleshs2024, bakkalis2023, chenz2023, chos2023, jarquin2023, liangz2023, linckere2023, luzdearau2023, rasheeda2023, zouh2023, adwaithd2022, andriyanovn2022, chenl2022, kanchid2022, paraskevopoulos2022, wangq2022, yuet2022, gallo2021, garg2021, guelorget2021, ma2021, setiawan2021, wang2021, zingaro2021, braz2020, carmona2020, hessel2020, jainr2019, ravikiranm2019, argon2018, guptad2018, matricm2018, tellez2018, rajendran2016, cristanim2014, liparas2014, zhangx2010, chens2009')
+data_modalities[["Text + Audio"]] <-	c('ronghaop2024, guod2023, ortizperez2023, chatziagapia2022, sapeao2022, zhu2020, akhtiamovo2017')
+data_modalities[["Symbolic Music + Metadata"]] <-	c('perezgraciat2010')
+data_modalities[["Text + Metadata"]] <-	c('jarrahia2023', 'shah2023, kozienkop2023, dacosta2022')
+data_modalities[["Text + Image + Audio"]] <-	c('akhiamov2018, schmittm2017')
+data_modalities[["Text + Motion Capture + Audio"]] <-	c('kenny2023')
+data_modalities[["Text + Time series"]] <-	c('dongpin2022, debreuij2020, anget2018')
+data_modalities[["Text + Image + Metadata"]] <-	c('jiangs2024, fujinumay2023, reil2023, guq2022')
+
+summary_df <- create_bubble_df(year_multimodal_df, data_modalities)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(8))(8),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Data Modalities (combinations of text, image, audio)",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 21}
+bubble_plot
+```
+
+```{r 22}
+knitr::kable(summary_df, caption = "Data Modalities (combinations of text, image, audio)") %>% kableExtra::kable_styling()
+```
+
+```{r 23}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 24}
+ggplot_chart
+```
+
+```{r 25}
+knitr::kable(unpacked_summary_df, caption = "Data Modalities (combinations of text, image, audio)") %>% kableExtra::kable_styling()
+```
+
+```{r 26}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Multimodal–Data Modalities (combinations of text, image, audio) (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 70
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-data-mod-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Type of Classification Task
+
+```{r 27}
+classification_tasks <- list()
+classification_tasks[['Binary Classification']] <- c('guod2023, jarquin2023, jarrahia2023, kozienkop2023, liangz2023, ortizperez2023, shah2023, adwaithd2022, chatziagapia2022, dacosta2022, guq2022, braz2020, debreuij2020, ravikiranm2019, akhiamov2018, argon2018, guptad2018, matricm2018, tellez2018, akhtiamovo2017')
+classification_tasks[['Multi-class Classification']] <- c('ghorbanali2024, jiangs2024, liub2024, liut2024, ronghaop2024, tengfeil2024, wajdm2024, yushili2024, zhangy2024, bakkalis2023, chenz2023, chos2023, jarquin2023, kenny2023, linckere2023, luzdearau2023, reil2023, zouh2023, adwaithd2022, andriyanovn2022, chenl2022, dongpin2022, kanchid2022, paraskevopoulos2022, sapeao2022, wangq2022, yuet2022, gallo2021, garg2021, setiawan2021, wang2021, zingaro2021, carmona2020, hessel2020, zhu2020, jainr2019, anget2018, schmittm2017, rajendran2016, cristanim2014, liparas2014, perezgraciat2010, zhangx2010, chens2009')
+classification_tasks[['Multi-label Classification']] <- c('fujinumay2023, guq2022, guelorget2021, ma2021')
+
+
+summary_df <- create_bubble_df(year_multimodal_df, classification_tasks)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Type of Classification Task",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 28}
+bubble_plot
+```
+
+```{r 29}
+knitr::kable(summary_df, caption = "Type of Classification Task") %>% kableExtra::kable_styling()
+```
+
+```{r 30}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 31}
+ggplot_chart
+```
+
+```{r 32}
+knitr::kable(unpacked_summary_df, caption = "Type of Classification Task") %>% kableExtra::kable_styling()
+```
+
+```{r 33}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Type of Classification Task (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 70
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-class-task-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Learning Paradigms
+
+```{r 34}
+learning_paradigms <- list()
+learning_paradigms[['Supervised Learning']] <- c('ghorbanali2024, jiangs2024, liub2024, liut2024, tengfeil2024, wajdm2024, yushili2024,  chenz2023, guod2023, jarquin2023, jarrahia2023, kenny2023, kozienkop2023, liangz2023, linckere2023, luzdearau2023, ortizperez2023, rasheeda2023, shah2023, adwaithd2022, andriyanovn2022, chatziagapia2022, dacosta2022, dongpin2022, guq2022, sapeao2022, yuet2022, gallo2021, ma2021, setiawan2021, wang2021, garg2021, braz2020, carmona2020, debreuij2020, hessel2020, jainr2019, ravikiranm2019, akhiamov2018, argon2018, matricm2018, tellez2018, akhtiamovo2017, schmittm2017, cristanim2014, liparas2014, perezgraciat2010, zhangx2010, chens2009')
+learning_paradigms[['Semi-supervised Learning']] <- c('chenl2022, anget2018, guptad2018')
+learning_paradigms[['Active Learning']] <- c('guelorget2021')
+learning_paradigms[['Transfer Learning']] <- c('ghorbanali2024, ronghaop2024, chenz2023, chos2023, fujinumay2023, chatziagapia2022, kanchid2022, wangq2022, zingaro2021, rajendran2016')
+learning_paradigms[['Contrastive Learning']] <- c('bakkalis2023, zouh2023,  chenl2022, paraskevopoulos2022')
+learning_paradigms[['Multi-task Learning']] <- c('reil2023')
+
+
+summary_df <- create_bubble_df(year_multimodal_df, learning_paradigms)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Learning Paradigms",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 35}
+bubble_plot
+```
+
+```{r 36}
+knitr::kable(summary_df, caption = "Learning Paradigms") %>% kableExtra::kable_styling()
+```
+
+```{r 37}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 38}
+ggplot_chart
+```
+
+```{r 39}
+knitr::kable(unpacked_summary_df, caption = "Learning Paradigms") %>% kableExtra::kable_styling()
+```
+
+```{r 40}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Learning Paradigms (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-learn-para-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Fusion Strategies
+
+```{r 41}
+fusion_strategies <- list()
+fusion_strategies[['Early Fusion']] <- c('arlqaraleshs2024, jiangs2024, liut2024, ronghaop2024, tengfeil2024, wajdm2024, zhangy2024, bakkalis2023, chos2023, guod2023, jarrahia2023, kenny2023, kozienkop2023, liangz2023, luzdearau2023, ortizperez2023, rasheeda2023, shah2023, adwaithd2022, dacosta2022, kanchid2022, paraskevopoulos2022, sapeao2022, wangq2022, yuet2022, gallo2021, guelorget2021, ma2021,  zingaro2021, braz2020, carmona2020, debreuij2020, zhu2020, jainr2019, ravikiranm2019, anget2018, argon2018, guptad2018, schmittm2017, cristanim2014, perezgraciat2010')
+fusion_strategies[['Late Fusion']] <- c('arlqaraleshs2024, liub2024, yushili2024, reil2023, andriyanovn2022, chatziagapia2022, dacosta2022, dongpin2022, guq2022, wang2021, garg2021, setiawan2021, ravikiranm2019, matricm2018, tellez2018, liparas2014, zhangx2010, chens2009')
+fusion_strategies[['Hybrid Fusion']] <- c('ghorbanali2024, chenz2023, fujinumay2023, linckere2023, zouh2023, dacosta2022, ravikiranm2019, akhiamov2018, akhtiamovo2017, rajendran2016')
+
+summary_df <- create_bubble_df(year_multimodal_df, fusion_strategies)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Fusion Strategies",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 42}
+bubble_plot
+```
+
+```{r 43}
+knitr::kable(summary_df, caption = "Fusion Strategies") %>% kableExtra::kable_styling()
+```
+
+```{r 44}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 45}
+ggplot_chart
+```
+
+```{r 46}
+knitr::kable(unpacked_summary_df, caption = "Fusion Strategies") %>% kableExtra::kable_styling()
+```
+
+```{r 47}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Fusion Strategies (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 70
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-fusion-start-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Fusion Techniques
+
+```{r 48}
+fusion_techniques <- list()
+fusion_techniques[['Machine Learning based Fusion']] <- c('reil2023, dacosta2022, wangq2022, setiawan2021, wang2021, carmona2020, akhiamov2018, argon2018, tellez2018, akhtiamovo2017, liparas2014, zhangx2010, chens2009')
+fusion_techniques[['Probabilistic Fusion']] <- c('ghorbanali2024, dongpin2022, cristanim2014, perezgraciat2010')
+fusion_techniques[['Neural Network Fusion']] <- c('jiangs2024, liub2024, liut2024, ronghaop2024, tengfeil2024, wajdm2024, yushili2024,   chos2023, fujinumay2023, jarquin2023, jarrahia2023, kenny2023, kozienkop2023, linckere2023, luzdearau2023, ortizperez2023, shah2023, zouh2023, adwaithd2022, chatziagapia2022, kanchid2022, paraskevopoulos2022, sapeao2022, yuet2022, gallo2021, garg2021, guelorget2021, ma2021, zingaro2021, braz2020, debreuij2020, jainr2019, ravikiranm2019, anget2018, guptad2018, rajendran2016')
+fusion_techniques[['Attention Fusion']] <- c('bakkalis2023, chenz2023, guod2023, liangz2023, rasheeda2023, ronghaop2024, zhu2020')
+
+summary_df <- create_bubble_df(year_multimodal_df, fusion_techniques)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Fusion Techniques",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 49}
+bubble_plot
+```
+
+```{r 50}
+knitr::kable(summary_df, caption = "Fusion Techniques") %>% kableExtra::kable_styling()
+```
+
+```{r 51}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 52}
+ggplot_chart
+```
+
+```{r 53}
+knitr::kable(unpacked_summary_df, caption = "Fusion Techniques") %>% kableExtra::kable_styling()
+```
+
+```{r 54}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Fusion Techniques (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 70
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-fusion-tech-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Datasets
+
+```{r 55}
+datasets <- list()
+datasets[['Public Benchmark Datasets']] <- c('ghorbanali2024, liub2024, liut2024, tengfeil2024, wajdm2024, yushili2024, bakkalis2023, kenny2023, kozienkop2023, liangz2023, zouh2023, chenl2022, kanchid2022, wangq2022, gallo2021, zingaro2021, jainr2019, argon2018, matricm2018, tellez2018, rajendran2016, chens2009')
+datasets[['Domain-specific Datasets']] <- c('jiangs2024, ronghaop2024, zhangy2024, arlqaraleshs2024, chenz2023, chos2023, fujinumay2023, guod2023, jarquin2023, jarrahia2023, linckere2023, luzdearau2023, ortizperez2023, rasheeda2023, reil2023, shah2023, adwaithd2022, andriyanovn2022, chatziagapia2022, chenl2022, dacosta2022, dongpin2022, guq2022, paraskevopoulos2022, sapeao2022, yuet2022, garg2021, guelorget2021, setiawan2021, wang2021, braz2020, carmona2020, debreuij2020, zhu2020, ravikiranm2019, akhiamov2018, anget2018, guptad2018, akhtiamovo2017, schmittm2017, cristanim2014, liparas2014, perezgraciat2010, zhangx2010')
+datasets[['Multilingual Datasets']] <- c('chos2023, fujinumay2023, liangz2023, ma2021, argon2018, matricm2018')
+
+summary_df <- create_bubble_df(year_multimodal_df, datasets)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Datasets",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 56}
+bubble_plot
+```
+
+```{r 57}
+knitr::kable(summary_df, caption = "Datasets") %>% kableExtra::kable_styling()
+```
+
+```{r 58}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 59}
+ggplot_chart
+```
+
+```{r 60}
+knitr::kable(unpacked_summary_df, caption = "Datasets") %>% kableExtra::kable_styling()
+```
+
+```{r 61}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Datasets (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mm-datasets-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+
+## Datasets, Models, and Performance metrics selected for comparison
+
+```{r 611}
+GG_PLOTS_REGISTER <- list()
+
+# Rename the columns to make them easier to work with
+multimodal_df_renamed <- multimodal_df %>%
+  rename(
+    datasets = 'Identified the datasets used in the article',
+    dis_datasets = 'Disambiguated datasets names',
+    models = 'What other models were selected for comparison?',
+    dis_models = 'Disambiguated models names',
+    metrics = 'Identified performance metrics used in the article',
+    dis_metrics = 'Disambiguated performance metrics names'
+  )
+
+# Create better titles for each column
+title_mapping <- c(
+  "dis_datasets" = "Disambiguated datasets names",
+  "dis_models" = "Disambiguated models names",
+  "dis_metrics" = "Disambiguated performance metrics names"
+)
+```
+
+### Datasets
+
+```{r 612}
+# Clean and standardize responses - convert everything to lower case and handle variations
+multimodal_dis_df <- multimodal_df_renamed %>%
+  select('l.p', 'dis_datasets') %>%
+  separate_rows('dis_datasets', sep = "\\r?\\n") %>%
+  mutate(
+    dis_datasets = stringr::str_to_lower(dis_datasets),
+    dis_datasets = stringr::str_trim(dis_datasets),
+    dis_datasets = na_if(dis_datasets, "")
+  )
+
+summary_df <- create_summary_df(multimodal_dis_df, 'dis_datasets') %>%
+  arrange(desc(count)) %>% filter(!is.na(group))
+
+summary_cuted_df <- summary_df %>%
+  # 1) lump any low‑frequency group into "other"
+  mutate(group = if_else(count < 4, "other", group)) %>%
+  # 2) re‑aggregate by the (possibly new) group
+  group_by(group, column) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  # 3) recompute percentages and labels over the new totals
+  mutate(percentage = count / sum(count) * 100,
+         label      = paste0(count, " \n (", round(percentage, 1), "%)")) %>%
+  # 4) order by descending count
+  arrange(desc(count))
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(7))(7),
+                                  unique(summary_cuted_df$group))
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = summary_cuted_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+
+ggsave(
+  "fig-mm-eval-datasets-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['dis_datasets']] <- ggplot_chart
+```
+
+```{r 613}
+ggplot_chart
+```
+
+```{r 13255221}
+knitr::kable(summary_df, caption = title_mapping['dis_datasets']) %>% kableExtra::kable_styling()
+```
+
+### Models selected for comparison
+
+```{r 614}
+# Clean and standardize responses - convert everything to lower case and handle variations
+multimodal_dis_df <- multimodal_df_renamed %>%
+  select('l.p', 'dis_models') %>%
+  separate_rows('dis_models', sep = "\\r?\\n") %>%
+  mutate(
+    dis_models = stringr::str_to_lower(dis_models),
+    dis_models = stringr::str_trim(dis_models),
+    dis_models = na_if(dis_models, "")
+  )
+
+summary_df <- create_summary_df(multimodal_dis_df, 'dis_models') %>%
+  arrange(desc(count)) %>% filter(!is.na(group))
+
+summary_cuted_df <- summary_df %>%
+  # 1) lump any low‑frequency group into "other"
+  mutate(group = if_else(count < 20, "other", group)) %>%
+  # 2) re‑aggregate by the (possibly new) group
+  group_by(group, column) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  # 3) recompute percentages and labels over the new totals
+  mutate(percentage = count / sum(count) * 100,
+         label      = paste0(count, " (", round(percentage, 1), "%)")) %>%
+  # 4) order by descending count
+  arrange(desc(count))
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(7))(7),
+                                  unique(summary_cuted_df$group))
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = summary_cuted_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+
+ggsave(
+  "fig-mm-eval-models-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['dis_models']] <- ggplot_chart
+```
+
+```{r 615}
+ggplot_chart
+```
+
+```{r 5125556t55}
+knitr::kable(summary_df, caption = title_mapping['dis_models']) %>% kableExtra::kable_styling()
+```
+
+### Performance metrics
+
+```{r 616}
+# Clean and standardize responses - convert everything to lower case and handle variations
+multimodal_dis_df <- multimodal_df_renamed %>%
+  select('l.p', 'dis_metrics') %>%
+  separate_rows('dis_metrics', sep = "\\r?\\n") %>%
+  mutate(
+    dis_metrics = stringr::str_to_lower(dis_metrics),
+    dis_metrics = stringr::str_trim(dis_metrics),
+    dis_metrics = na_if(dis_metrics, "")
+  )
+
+summary_df <- create_summary_df(multimodal_dis_df, 'dis_metrics') %>%
+  arrange(desc(count)) %>% filter(!is.na(group))
+
+summary_cuted_df <- summary_df %>%
+  # 1) lump any low‑frequency group into "other"
+  mutate(group = if_else(count < 11, "other", group)) %>%
+  # 2) re‑aggregate by the (possibly new) group
+  group_by(group, column) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  # 3) recompute percentages and labels over the new totals
+  mutate(percentage = count / sum(count) * 100,
+         label      = paste0(count, " (", round(percentage, 1), "%)")) %>%
+  # 4) order by descending count
+  arrange(desc(count))
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(7))(7),
+                                  unique(summary_cuted_df$group))
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = summary_cuted_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+
+ggsave(
+  "fig-mm-eval-per-met-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['dis_metrics']] <- ggplot_chart
+```
+
+```{r 617}
+ggplot_chart
+```
+
+```{r 34234}
+knitr::kable(summary_df, caption = title_mapping['dis_metrics']) %>% kableExtra::kable_styling()
+```
+
+### All plots
+
+```{r 618}
+# Treemap charts of the distribution of datasets, models and performance metrixes used in multimodal works
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title,
+                             gp = grid::gpar(fontsize = 14, fontface = "plain"),
+                             just = "center")
+
+layout <- rbind(
+  c(1, 1),
+  c(2, 3),
+  c(4, 4)
+)
+
+combined_plot <- gridExtra::grid.arrange(
+  title_grob,
+  GG_PLOTS_REGISTER[['dis_datasets']], GG_PLOTS_REGISTER[['dis_metrics']], GG_PLOTS_REGISTER[['dis_models']],
+  layout_matrix = layout,
+  heights       = c(1, 10, 10)  # tweak these ratios to taste
+)
+
+ggsave(
+  "fig-mm-datasets-models-met-pie.pdf",
+  plot = combined_plot,
+  width = 14,
+  height = 8
+)
+```
+
+```{r 324234}
+plot(combined_plot)
+```
+
+## Validation procedure
+
+```{r 619}
+GG_PLOTS_REGISTER <- list()
+
+# Rename the columns to make them easier to work with
+multimodal_df_renamed <- multimodal_df %>%
+  rename(
+    test_set_used = 'Was a test set or cross-validation procedure used to determine the performance metrics values? Please write only yes, or no.',
+    statistical_tests = 'Were statistical tests used? Please write only yes, or no.',
+    other_analysis_methods = 'Did other methods of analyzing the outcomes, for example Bayesian, explainable machine learning methods, be used? Please write yes, or no.',
+    ablation_studies = 'Were ablation studies and/or comparisons with unimodal classifiers performed? Please write yes, or no.',
+    replication_info = 'Did the authors provide enough information (data, code) to allow for replication of the study? Please write only yes, or no.'
+  )
+
+# Clean and standardize responses - convert everything to lower case and handle variations
+multimodal_df_clean <- multimodal_df_renamed %>%
+  mutate(across(
+    c(
+      test_set_used,
+      statistical_tests,
+      other_analysis_methods,
+      ablation_studies,
+      replication_info
+    ),
+    ~ case_when(
+      tolower(.) %in% c("yes", "y") ~ "Yes",
+      tolower(.) %in% c("no", "n") ~ "No",
+      is.na(.) ~ "No",
+      TRUE ~ "No"
+    )
+  ))
+
+# Create better titles for each column
+title_mapping <- c(
+  "test_set_used" = "Test Set or Cross-Validation Used",
+  "statistical_tests" = "Statistical Tests Used",
+  "other_analysis_methods" = "Alternative Analysis Methods Used",
+  "ablation_studies" = "Ablation Studies Performed",
+  "replication_info" = "Replication Information Provided"
+)
+```
+
+```{r 6100}
+summary_df <- create_summary_df(multimodal_df_clean, 'test_set_used')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['test_set_used'], global_palette = global_palette)
+
+ggsave(
+  "fig-mm-eval-test-set-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['test_set_used']] <- ggplot_chart
+```
+
+```{r 6345}
+ggplot_chart
+```
+
+```{r 234111}
+knitr::kable(summary_df, caption = title_mapping['test_set_used']) %>% kableExtra::kable_styling()
+```
+
+```{r 124123554}
+summary_df <- create_summary_df(multimodal_df_clean, 'statistical_tests')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['statistical_tests'], global_palette = global_palette)
+  
+ggsave("fig-mm-eval-stat-test-pie.pdf", plot = ggplot_chart, width = 14, height = 8)
+
+GG_PLOTS_REGISTER[['statistical_tests']] <- ggplot_chart
+```
+
+```{r 435435}
+ggplot_chart
+```
+
+```{r 12432111}
+knitr::kable(summary_df, caption = title_mapping['statistical_tests']) %>% kableExtra::kable_styling()
+```
+
+```{r 12431244}
+summary_df <- create_summary_df(multimodal_df_clean, 'other_analysis_methods')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['other_analysis_methods'], global_palette = global_palette)
+
+ggsave(
+  "fig-mm-eval-other-test-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['other_analysis_methods']] <- ggplot_chart
+```
+
+```{r 345345}
+ggplot_chart
+```
+
+```{r 1241111111}
+knitr::kable(summary_df, caption = title_mapping['other_analysis_methods']) %>% kableExtra::kable_styling()
+```
+
+```{r 214511}
+summary_df <- create_summary_df(multimodal_df_clean, 'ablation_studies')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['ablation_studies'], global_palette = global_palette)
+
+ggsave(
+  "fig-mm-eval-ablation-study-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['ablation_studies']] <- ggplot_chart
+```
+
+```{r 23423}
+ggplot_chart
+```
+
+```{r 2455512}
+knitr::kable(summary_df, caption = title_mapping['ablation_studies']) %>% kableExtra::kable_styling()
+```
+
+```{r 12451241245}
+summary_df <- create_summary_df(multimodal_df_clean, 'replication_info')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['replication_info'], global_palette = global_palette)
+
+ggsave(
+  "fig-mm-eval-replication-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['replication_info']] <- ggplot_chart
+```
+
+```{r 877}
+ggplot_chart
+```
+
+```{r 1455233}
+knitr::kable(summary_df, caption = title_mapping['replication_info']) %>% kableExtra::kable_styling()
+```
+
+### All plots
+
+```{r 234}
+# Pie charts of studies evaluation & replication
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title,
+                             gp = grid::gpar(fontsize = 14, fontface = "plain"),
+                             just = "center")
+
+layout <- rbind(
+  c(1, NA, 2),  # Top row: plot 1, empty, plot 2
+  c(NA, 3, NA), # Middle row: empty, plot 3, empty
+  c(4, NA, 5)   # Bottom row: plot 4, empty, plot 5
+)
+
+combined_plot <- gridExtra::grid.arrange(
+  GG_PLOTS_REGISTER[['test_set_used']],      # position 1: top-left
+  GG_PLOTS_REGISTER[['statistical_tests']],  # position 2: top-right
+  GG_PLOTS_REGISTER[['other_analysis_methods']], # position 3: middle-center
+  GG_PLOTS_REGISTER[['ablation_studies']],   # position 4: bottom-left
+  GG_PLOTS_REGISTER[['replication_info']],   # position 5: bottom-right
+  layout_matrix = layout
+)
+
+combined_plot <- gridExtra::grid.arrange(
+  title_grob,
+  combined_plot,
+  ncol = 1,
+  heights = c(0.5, 10)  # Title takes less space than the plots
+)
+
+ggsave(
+  "fig-mm-eval-test-set-tests-abl-rep-pie.pdf",
+  plot = combined_plot,
+  width = 14,
+  height = 8
+)
+```
+
+```{r 121241515325}
+plot(combined_plot)
+```
+
+# Multiview reserch papper analysis
+
+```{r 62}
+multiview_df <- excel_df %>%
+  filter(bibtexkey %in% MULTIVIEW_BIBTEXKEY)
+
+head(multiview_df)
+```
+
+```{r 63}
+paste("Extracted", nrow(multiview_df), "multiview papers out of", nrow(excel_df), "total papers")
+```
+
+## Topics
+
+```{r 64}
+year_multiview_df <- multiview_df %>%
+  mutate(bibtexkey = tolower(bibtexkey)) %>%
+  inner_join(
+    bib_df %>% mutate(BIBTEXKEY = tolower(BIBTEXKEY)) %>% select('BIBTEXKEY', 'YEAR'),
+    by = c("bibtexkey" = "BIBTEXKEY")
+  )
+```
+
+### General Framework
+
+```{r 65}
+general_framework <- list()
+general_framework[['When to use multi-view learning']] <-	c('brefeldu2015', 'aminim2009')
+general_framework[['Handling missing views']] <-	c('zhangqi2024', 'doinychko2020', 'aminim2009')
+general_framework[['Multi-view representation learning']] <-	c('samya2023', 'sangy2022', 'jiax2021', 'liang2021', 'sus2021', 'yangp2014', 'zhang2021', 'maf2020', 'wangh2020', 'bhatt2019', 'chens2019', 'hoylea2019', 'wangh2019', 'ferreira2018', 'zhup2018', 'zhanz2017', 'perinaa2013', 'zhangb2013', 'zhangd2013', 'guyo2012', 'kovesim2012', 'yangp2012', 'zhengw2011', 'zhangb2008') 
+general_framework[['Multi-view data fusion']] <-	c('fengz2024', 'jiz2024', 'xuy2024', 'varmanp2023', 'zhao2023', 'cgoncalves2022', 'liuj2022', 'luox2022', 'gui2021', 'huc2021', 'liuw2021', 'mmironczuk2020', 'mmironczuk2019', 'pengj2018', 'huz2017', 'sinorar2016', 'xuh2016', 'fakri2015', 'liuj2014', 'longg2013', 'lig2012', 'aminim2010', 'aminim2010b', 'suns2010', 'zhangx2010b', 'suns2008', 'matsubara2005', 'dasigiv2001')
+
+summary_df <- create_bubble_df(year_multiview_df, general_framework)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(5))(5),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "General Framework",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 66}
+bubble_plot
+```
+
+```{r 67}
+knitr::kable(summary_df, caption = "General Framework") %>% kableExtra::kable_styling()
+```
+
+```{r 68}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 69}
+ggplot_chart
+```
+
+```{r 70}
+knitr::kable(unpacked_summary_df, caption = "General Framework") %>% kableExtra::kable_styling()
+```
+
+```{r 71}
+# 1. Wrap the title at ~60 characters per line
+# Treemap of the Distribution of Works on Multimodal–General Framework (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mv-gen-frem-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Task
+
+```{r 1243214}
+tasks <- list()
+tasks[['Finance']] <- c('zhao2023')
+tasks[['Social media analysis']] <- c('graffm2023', 'tianl2023', 'karisanip2022')
+tasks[['Hate speech and offensive language detection']] <- c('graffm2023', 'lij2020')
+tasks[['Fake news detection']] <- c('varmanp2023')
+tasks[['Emotion recognition']] <- c('zhang2021')
+tasks[['Sentiment analysis']] <- c('zhang2021', 'hoylea2019')
+tasks[['Author profiling']] <- c('carmona2020')
+tasks[['Technology forecasting']] <- c('gui2021')
+tasks[['Multilingual text categorization']] <- c('sus2021', 'doinychko2020', 'maf2020', 'bhatt2019', 'zhanz2017', 'rajendran2016', 'fakri2015', 'guyo2012', 'kovesim2012', 'aminim2010', 'aminim2010b', 'aminim2009')
+tasks[['Adversarial text classification']] <- c('lij2020')
+tasks[['Lobbying disclosure analysis']] <- c('liaox2015')
+tasks[['Software document classification']] <- c('liuj2014')
+tasks[['Short text classification']] <- c('luox2022', 'longg2013')
+tasks[['Web document classification']] <- c('mmironczuk2020', 'mmironczuk2019', 'suns2010', 'chenb2009', 'gup2009', 'zhangx2009', 'suns2008')
+tasks[['News Article Classification']] <- c('dasigiv2001')
+tasks[['Biomedical document, article analysis']] <- c('cgoncalves2022')
+tasks[['Healthcare']] <- c('liuj2022', 'huz2017', 'xuh2016')
+tasks[['Personality Prediction']] <- c('sangy2022')
+tasks[['Extreme multi-label text classification']] <- c('chens2019')
+tasks[['Other multi-view tasks']] <- c('akhtiamov2019', 'ferreira2018')
+
+summary_df <- create_bubble_df(year_multiview_df, tasks)
+
+base <- ggsci::pal_jco("default")(10)
+extra <- c(lighten(base, 0.3), darken(base, 0.2))
+palette_23 <- c(base, extra)[1:23]
+global_palette <- stats::setNames(palette_23, unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Tasks",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 1242134}
+bubble_plot
+```
+
+```{r 14124}
+knitr::kable(summary_df, caption = "Tasks") %>% kableExtra::kable_styling()
+```
+
+```{r 12412455}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 124124}
+ggplot_chart
+```
+
+```{r 12454555}
+knitr::kable(unpacked_summary_df, caption = "Tasks") %>% kableExtra::kable_styling()
+```
+
+```{r 8923507984523}
+# 1. Wrap the title at ~60 characters per line
+# Treemap of the Distribution of Works on Multimodal–Task (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mv-task-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Type of Classification Task
+
+```{r 72}
+classification_tasks <- list()
+classification_tasks[['One-class Classification']] <- c('huc2021', 'chenb2009')
+classification_tasks[['Binary Classification']] <- c('graffm2023', 'tianl2023', 'varmanp2023', 'cgoncalves2022', 'karisanip2022', 'liuj2022', 'sangy2022', 'carmona2020', 'lij2020', 'mmironczuk2020', 'akhtiamov2019', 'mmironczuk2019', 'pengj2018', 'huz2017', 'xux2016', 'brefeldu2015', 'liuj2014', 'yangp2014', 'longg2013', 'zhangb2013', 'zhangd2013', 'guyo2012', 'lig2012', 'yangp2012', 'aminim2010', 'aminim2010b', 'suns2010', 'aminim2009', 'suns2008', 'zhangb2008', 'matsubara2005')
+classification_tasks[['Multi-class Classification']] <- c('jiz2024', 'xuy2024', 'zhangqi2024', 'samya2023', 'zhao2023', 'luox2022', 'gui2021', 'jiax2021', 'liang2021', 'sus2021', 'zhang2021', 'doinychko2020', 'maf2020', 'max2020', 'wangh2020', 'bhatt2019', 'hey2019', 'hoylea2019', 'wangh2019', 'ferreira2018', 'xuc2017', 'zhanz2017', 'iglesias2016', 'rajendran2016', 'sinorar2016', 'xuh2016', 'fakri2015', 'liy2013', 'perinaa2013', 'kovesim2012', 'zhengw2011', 'zhangx2010b', 'gup2009', 'zhangx2009', 'dasigiv2001')
+classification_tasks[['Multi-label Classification']] <- c('fengz2024', 'liuw2021', 'zhang2021', 'chens2019', 'zhup2018', 'liaox2015')
+
+
+summary_df <- create_bubble_df(year_multiview_df, classification_tasks)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Type of Classification Task",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 73}
+bubble_plot
+```
+
+```{r 74}
+knitr::kable(summary_df, caption = "Type of Classification Task") %>% kableExtra::kable_styling()
+```
+
+```{r 75}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 76}
+ggplot_chart
+```
+
+```{r 77}
+knitr::kable(unpacked_summary_df, caption = "Type of Classification Task") %>% kableExtra::kable_styling()
+```
+
+```{r 78}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Type of Classification Task (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 70
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mv-class-task-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Learning Paradigms
+
+```{r 79}
+learning_paradigms <- list()
+learning_paradigms[['Supervised Learning']] <- c('fengz2024', 'graffm2023', 'varmanp2023', 'zhao2023', 'cgoncalves2022', 'luox2022', 'gui2021', 'liang2021', 'liuw2021', 'sus2021', 'zhang2021', 'carmona2020', 'mmironczuk2020', 'akhtiamov2019', 'bhatt2019', 'chens2019', 'mmironczuk2019', 'ferreira2018', 'pengj2018', 'zhup2018', 'huz2017', 'xuc2017', 'zhanz2017', 'sinorar2016', 'xuh2016', 'liaox2015', 'liuj2014', 'liy2013', 'zhangd2013', 'kovesim2012', 'zhengw2011', 'aminim2010', 'zhangx2010b', 'aminim2009', 'dasigiv2001')
+learning_paradigms[['Semi-supervised Learning']] <- c('jiz2024', 'zhangqi2024', 'huc2021', 'jiax2021', 'maf2020', 'iglesias2016', 'xux2016', 'brefeldu2015', 'fakri2015', 'longg2013', 'guyo2012', 'lig2012', 'aminim2010b', 'aminim2009', 'chenb2009', 'gup2009', 'suns2008', 'zhangb2008', 'matsubara2005')
+learning_paradigms[['Active Learning']] <- c('jiz2024', 'karisanip2022', 'liuj2022', 'suns2010', 'gup2009', 'zhangx2009', 'suns2008')
+learning_paradigms[['Transfer Learning']] <- c('fengz2024', 'bhatt2019', 'hey2019', 'rajendran2016', 'yangp2014', 'zhangb2013', 'yangp2012')
+learning_paradigms[['Contrastive Learning']] <- c('samya2023')
+learning_paradigms[['Graph Learning']] <- c('xuy2024')
+learning_paradigms[['Meta Learning']] <- c('tianl2023')
+learning_paradigms[['Few-shot Learning']] <- c('tianl2023')
+learning_paradigms[['Adversarial Learning']] <- c('doinychko2020', 'lij2020')
+
+summary_df <- create_bubble_df(year_multiview_df, learning_paradigms)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(9))(9),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Learning Paradigms",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 80}
+bubble_plot
+```
+
+```{r 81}
+knitr::kable(summary_df, caption = "Learning Paradigms") %>% kableExtra::kable_styling()
+```
+
+```{r 82}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 83}
+ggplot_chart
+```
+
+```{r 84}
+knitr::kable(unpacked_summary_df, caption = "Learning Paradigms") %>% kableExtra::kable_styling()
+```
+
+```{r 85}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Learning Paradigms (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mv-learn-para-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Fusion Strategies
+
+```{r 86}
+fusion_strategies <- list()
+fusion_strategies[['Early Fusion']] <- c('jiz2024', 'xuy2024', 'zhangqi2024', 'samya2023', 'varmanp2023', 'luox2022', 'sangy2022', 'huc2021', 'jiax2021', 'liang2021', 'liuw2021', 'sus2021', 'zhang2021', 'carmona2020', 'lij2020', 'max2020', 'wangh2020', 'bhatt2019', 'wangh2019', 'ferreira2018', 'huz2017', 'xuc2017', 'zhanz2017', 'xuh2016', 'liy2013', 'zhangb2013', 'lig2012', 'zhengw2011', 'dasigiv2001')
+fusion_strategies[['Late Fusion']] <- c('graffm2023', 'tianl2023', 'cgoncalves2022', 'gui2021',  'mmironczuk2020', 'akhtiamov2019', 'hoylea2019', 'mmironczuk2019', 'pengj2018', 'zhup2018', 'iglesias2016', 'sinorar2016', 'brefeldu2015', 'fakri2015', 'liaox2015', 'longg2013', 'kovesim2012', 'suns2010', 'zhangx2010b', 'zhangx2009', 'suns2008', 'zhangb2008', 'matsubara2005')
+fusion_strategies[['Hybrid Fusion']] <- c('fengz2024','zhao2023', 'karisanip2022', 'liuj2022', 'doinychko2020', 'maf2020', 'chens2019', 'hey2019', 'rajendran2016', 'xux2016', 'liuj2014', 'zhangd2013', 'guyo2012', 'aminim2010', 'aminim2010b', 'chenb2009', 'gup2009')
+
+summary_df <- create_bubble_df(year_multiview_df, fusion_strategies)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Fusion Strategies",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 87}
+bubble_plot
+```
+
+```{r 88}
+knitr::kable(summary_df, caption = "Fusion Strategies") %>% kableExtra::kable_styling()
+```
+
+```{r 89}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 90}
+ggplot_chart
+```
+
+```{r 91}
+knitr::kable(unpacked_summary_df, caption = "Fusion Strategies") %>% kableExtra::kable_styling()
+```
+
+```{r 92}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Fusion Strategies (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 70
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mv-fusion-start-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Fusion Techniques
+
+```{r 93}
+fusion_techniques <- list()
+fusion_techniques[['Machine Learning based Fusion']] <- c('graffm2023', 'zhao2023', 'cgoncalves2022', 'huc2021', 'sus2021', 'carmona2020', 'mmironczuk2020', 'wangh2020', 'akhtiamov2019', 'bhatt2019', 'hey2019', 'mmironczuk2019', 'wangh2019', 'pengj2018', 'zhup2018', 'zhanz2017', 'sinorar2016', 'xux2016', 'longg2013', 'zhangb2013', 'zhangd2013', 'lig2012', 'zhengw2011', 'suns2010', 'zhangx2009', 'suns2008')
+fusion_techniques[['Probabilistic Fusion']] <- c('fengz2024', 'hoylea2019', 'iglesias2016', 'brefeldu2015', 'fakri2015', 'perinaa2013', 'aminim2010', 'aminim2010b', 'zhangx2010b', 'gup2009', 'zhangb2008')
+fusion_techniques[['Neural Network Fusion']] <- c('jiz2024', 'zhangqi2024', 'tianl2023', 'varmanp2023', 'liuj2022', 'luox2022', 'gui2021', 'jiax2021', 'liuw2021', 'doinychko2020', 'lij2020', 'max2020', 'chens2019', 'huz2017', 'xuc2017', 'rajendran2016', 'xuh2016', 'dasigiv2001')
+fusion_techniques[['Attention Fusion']] <- c('sangy2022', 'liang2021', 'zhang2021')
+fusion_techniques[['Graph Fusion']] <- c('fengz2024', 'jiz2024', 'xuy2024', 'samya2023', 'lig2012')
+
+summary_df <- create_bubble_df(year_multiview_df, fusion_techniques)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Fusion Techniques",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 94}
+bubble_plot
+```
+
+```{r 95}
+knitr::kable(summary_df, caption = "Fusion Techniques") %>% kableExtra::kable_styling()
+```
+
+```{r 96}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 97}
+ggplot_chart
+```
+
+```{r 98}
+knitr::kable(unpacked_summary_df, caption = "Fusion Techniques") %>% kableExtra::kable_styling()
+```
+
+```{r 99}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Fusion Techniques (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 70
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mv-fusion-tech-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+### Datasets
+
+```{r 100}
+datasets <- list()
+datasets[['Public Benchmark Datasets']] <- c('fengz2024', 'jiz2024', 'xuy2024', 'zhangqi2024', 'samya2023', 'varmanp2023', 'luox2022', 'huc2021', 'jiax2021', 'liang2021', 'liuw2021', 'zhang2021', 'doinychko2020', 'max2020', 'wangh2020', 'bhatt2019', 'chens2019', 'hey2019', 'hoylea2019', 'wangh2019', 'ferreira2018', 'pengj2018', 'zhup2018', 'xuc2017', 'iglesias2016', 'rajendran2016', 'sinorar2016', 'xuh2016', 'xux2016', 'brefeldu2015', 'fakri2015', 'liuj2014', 'yangp2014', 'liy2013', 'longg2013', 'perinaa2013', 'zhangb2013', 'zhangd2013', 'yangp2012', 'zhengw2011', 'aminim2010', 'aminim2010b', 'aminim2009', 'chenb2009', 'gup2009', 'zhangx2009', 'zhangb2008', 'matsubara2005', 'dasigiv2001')
+datasets[['Domain-specific Datasets']] <- c('graffm2023', 'zhao2023', 'cgoncalves2022', 'liuj2022', 'sangy2022', 'gui2021', 'carmona2020', 'lij2020', 'mmironczuk2020', 'akhtiamov2019', 'mmironczuk2019', 'huz2017', 'liaox2015', 'suns2010', 'suns2008')
+datasets[['Multilingual Datasets']] <- c('tianl2023', 'sus2021', 'carmona2020', 'maf2020', 'maf2020', 'bhatt2019', 'zhanz2017', 'guyo2012', 'kovesim2012', 'aminim2010', 'aminim2010b', 'aminim2009')
+
+summary_df <- create_bubble_df(year_multiview_df, datasets)
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(6))(6),
+                                  unique(summary_df$group))
+
+bubble_plot <- create_bubble_plot(summary_df, 
+                  title = "Datasets",
+                  subtitle = "Distribution of papers by category and publication year",
+                  global_palette = global_palette)
+```
+
+```{r 101}
+bubble_plot
+```
+
+```{r 102}
+knitr::kable(summary_df, caption = "Datasets") %>% kableExtra::kable_styling()
+```
+
+```{r 103}
+unpacked_df <- summary_df[rep(row.names(summary_df), summary_df$n), c("group", "YEAR")]
+
+unpacked_summary_df <- create_summary_df(unpacked_df, "group")
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = unpacked_summary_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+```
+
+```{r 104}
+ggplot_chart
+```
+
+```{r 105}
+knitr::kable(unpacked_summary_df, caption = "Datasets") %>% kableExtra::kable_styling()
+```
+
+```{r 106}
+# 1. Wrap the title
+# Treemap of the Distribution of Works on Datasets (Left), and Annual Distribution of These Works (Right)
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title, gp = grid::gpar(fontsize = 16, fontface = "bold"), hjust = 0.5)
+
+# 2. Extract the FILL legend (from treemap)
+treemap_for_fill_legend <- ggplot_chart +
+  guides(
+    fill = guide_legend(
+      ncol = 8, 
+      byrow = TRUE,
+      keywidth = unit(0.6, "cm"),
+      keyheight = unit(0.6, "cm"),
+      title = "Group",
+      title.position = "top", 
+      title.hjust = 0.5 
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal", 
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 8), 
+    legend.spacing.x = unit(0.15, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.background = element_rect(fill="transparent", colour = NA), # Ensure no box around fill legend either
+    legend.box.background = element_rect(fill="transparent", colour = NA),
+    legend.box.margin = margin(t = 5, r = 5, b = 5, l = 0) # Margin for fill legend
+  )
+
+g_fill <- ggplotGrob(treemap_for_fill_legend)
+fill_legend_grob <- g_fill$grobs[[which(sapply(g_fill$grobs, function(x) x$name) == "guide-box")]]
+
+# 3. Extract the SIZE legend (from bubble plot, horizontal, no box)
+bubble_plot_for_size_legend <- bubble_plot +
+  guides(
+    fill = "none", 
+    size = guide_legend(
+      title = "Count",
+      direction = "horizontal",
+      title.position = "top",    
+      label.position = "bottom", 
+      keywidth = unit(1.2, "cm"), 
+      keyheight = unit(0.8, "cm"),
+      label.hjust = 0.5,         
+      title.hjust = 0.5,         
+      override.aes = list(fill = "grey70", color = NA, alpha = 0.8, shape = 21) # color = NA for no border on keys
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal",
+    legend.title = element_text(size = 10, face = "plain"),
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill="transparent", colour = NA), # No fill, no border for overall legend
+    legend.box.background = element_rect(fill="transparent", colour = NA), # No fill, no border for the guide box
+    legend.key = element_rect(fill="transparent", colour = NA), # No fill/border for individual key backgrounds
+    legend.spacing.x = unit(0.1, "cm"), # Tighter spacing for horizontal legend
+    legend.box.margin = margin(t = 5, r = 0, b = 5, l = 5) # Margin for size legend
+  )
+
+g_size <- ggplotGrob(bubble_plot_for_size_legend)
+size_legend_grob <- g_size$grobs[[which(sapply(g_size$grobs, function(x) x$name) == "guide-box")]]
+
+# Check if legends were found
+if(is.null(fill_legend_grob)) stop("Fill legend not found!")
+if(is.null(size_legend_grob)) stop("Size legend not found!")
+
+# 4. Combine the two extracted legends HORIZONTALLY
+#    Give fill legend more space.
+combined_legends_grob <- arrangeGrob(
+  fill_legend_grob,
+  size_legend_grob,
+  ncol = 2,
+  widths = unit(c(0.65, 0.35), "npc") # Fill legend gets 65%, Size legend gets 35% of the horizontal space for legends
+                                      # Adjust these proportions as needed.
+)
+
+# 5. Remove legends from the original plots for the main panel
+ggplot_chart_no_legend <- ggplot_chart + theme(legend.position = "none")
+bubble_plot_no_legend <- bubble_plot + 
+ theme(legend.position = "none",
+       plot.title = element_blank(), 
+       plot.subtitle = element_blank())
+
+# 6. Arrange the plots in a 2-column layout
+plots_row <- arrangeGrob(
+  ggplot_chart_no_legend,
+  bubble_plot_no_legend,
+  ncol = 2
+)
+
+# 7. Create the combined plot 
+#    The height of the legend panel will be determined by the taller of the two (multi-row fill legend)
+title_height_est <- grobHeight(title_grob) + unit(0.2, "inches") 
+
+# Calculate height of the combined horizontal legend panel
+# It will be the height of the fill legend (which is multi-row)
+legend_panel_actual_height <- grobHeight(fill_legend_grob) 
+final_legend_panel_height <- legend_panel_actual_height + unit(0.3, "inches") # Add padding
+
+combined_plot_final <- grid.arrange(
+  title_grob,
+  plots_row,
+  combined_legends_grob,
+  ncol = 1,
+  heights = unit.c(title_height_est,
+                   unit(1, "null"), 
+                   final_legend_panel_height) 
+)
+
+ggsave(
+  "fig-mv-datasets-pie-bubble.pdf",
+  plot = combined_plot_final,
+  width = 14,
+  height = 8
+)
+```
+
+## Datasets, Models, and Performance metrics selected for comparison
+
+```{r 107}
+GG_PLOTS_REGISTER <- list()
+
+# Rename the columns to make them easier to work with
+df_renamed <- multiview_df %>%
+  rename(
+    datasets = 'Identified the datasets used in the article',
+    dis_datasets = 'Disambiguated datasets names',
+    models = 'What other models were selected for comparison?',
+    dis_models = 'Disambiguated models names',
+    metrics = 'Identified performance metrics used in the article',
+    dis_metrics = 'Disambiguated performance metrics names'
+  )
+
+# Create better titles for each column
+title_mapping <- c(
+  "dis_datasets" = "Disambiguated datasets names",
+  "dis_models" = "Disambiguated models names",
+  "dis_metrics" = "Disambiguated performance metrics names"
+)
+```
+
+### Datasets
+
+```{r 108}
+# Clean and standardize responses - convert everything to lower case and handle variations
+dis_df <- df_renamed %>%
+  select('l.p', 'dis_datasets') %>%
+  separate_rows('dis_datasets', sep = "\\r?\\n") %>%
+  mutate(
+    dis_datasets = stringr::str_to_lower(dis_datasets),
+    dis_datasets = stringr::str_trim(dis_datasets),
+    dis_datasets = na_if(dis_datasets, "")
+  )
+
+summary_df <- create_summary_df(dis_df, 'dis_datasets') %>%
+  arrange(desc(count)) %>% filter(!is.na(group))
+
+summary_cuted_df <- summary_df %>%
+  # 1) lump any low‑frequency group into "other"
+  mutate(group = if_else(count < 5, "other", group)) %>%
+  # 2) re‑aggregate by the (possibly new) group
+  group_by(group, column) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  # 3) recompute percentages and labels over the new totals
+  mutate(percentage = count / sum(count) * 100,
+         label      = paste0(count, " \n (", round(percentage, 1), "%)")) %>%
+  # 4) order by descending count
+  arrange(desc(count))
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(7))(7),
+                                  unique(summary_cuted_df$group))
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = summary_cuted_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+
+ggsave(
+  "fig-mv-eval-datasets-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['dis_datasets']] <- ggplot_chart
+```
+
+```{r 109}
+ggplot_chart
+```
+
+```{r 110}
+knitr::kable(summary_df, caption = title_mapping['dis_datasets']) %>% kableExtra::kable_styling()
+```
+
+### Models selected for comparison
+
+```{r 111}
+# Clean and standardize responses - convert everything to lower case and handle variations
+dis_df <- df_renamed %>%
+  select('l.p', 'dis_models') %>%
+  separate_rows('dis_models', sep = "\\r?\\n") %>%
+  mutate(
+    dis_models = stringr::str_to_lower(dis_models),
+    dis_models = stringr::str_trim(dis_models),
+    dis_models = na_if(dis_models, "")
+  )
+
+summary_df <- create_summary_df(dis_df, 'dis_models') %>%
+  arrange(desc(count)) %>% filter(!is.na(group))
+
+summary_cuted_df <- summary_df %>%
+  # 1) lump any low‑frequency group into "other"
+  mutate(group = if_else(count < 20, "other", group)) %>%
+  # 2) re‑aggregate by the (possibly new) group
+  group_by(group, column) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  # 3) recompute percentages and labels over the new totals
+  mutate(percentage = count / sum(count) * 100,
+         label      = paste0(count, " (", round(percentage, 1), "%)")) %>%
+  # 4) order by descending count
+  arrange(desc(count))
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(7))(7),
+                                  unique(summary_cuted_df$group))
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = summary_cuted_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+
+ggsave(
+  "fig-mv-eval-models-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['dis_models']] <- ggplot_chart
+```
+
+```{r 112}
+ggplot_chart
+```
+
+```{r 113}
+knitr::kable(summary_df, caption = title_mapping['dis_models']) %>% kableExtra::kable_styling()
+```
+
+### Performance metrics
+
+```{r 114}
+# Clean and standardize responses - convert everything to lower case and handle variations
+dis_df <- df_renamed %>%
+  select('l.p', 'dis_metrics') %>%
+  separate_rows('dis_metrics', sep = "\\r?\\n") %>%
+  mutate(
+    dis_metrics = stringr::str_to_lower(dis_metrics),
+    dis_metrics = stringr::str_trim(dis_metrics),
+    dis_metrics = na_if(dis_metrics, "")
+  )
+
+summary_df <- create_summary_df(dis_df, 'dis_metrics') %>%
+  arrange(desc(count)) %>% filter(!is.na(group))
+
+summary_cuted_df <- summary_df %>%
+  # 1) lump any low‑frequency group into "other"
+  mutate(group = if_else(count < 11, "other", group)) %>%
+  # 2) re‑aggregate by the (possibly new) group
+  group_by(group, column) %>%
+  summarise(count = sum(count), .groups = "drop") %>%
+  # 3) recompute percentages and labels over the new totals
+  mutate(percentage = count / sum(count) * 100,
+         label      = paste0(count, " (", round(percentage, 1), "%)")) %>%
+  # 4) order by descending count
+  arrange(desc(count))
+
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(7))(7),
+                                  unique(summary_cuted_df$group))
+
+ggplot_chart <- create_treemap_chart(
+  summary_df = summary_cuted_df,
+  title = "",
+  subtitle = "",
+  global_palette = global_palette,
+  text_size = 11  # Adjust as needed
+)
+
+ggsave(
+  "fig-mv-eval-per-met-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['dis_metrics']] <- ggplot_chart
+```
+
+```{r 115}
+ggplot_chart
+```
+
+```{r 116}
+knitr::kable(summary_df, caption = title_mapping['dis_metrics']) %>% kableExtra::kable_styling()
+```
+
+### All plots
+
+```{r 117}
+# Treemap charts of the distribution of datasets, models and performance metrixes used in multiview works
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title,
+                             gp = grid::gpar(fontsize = 14, fontface = "plain"),
+                             just = "center")
+
+layout <- rbind(
+  c(1, 1),
+  c(2, 3),
+  c(4, 4)
+)
+
+combined_plot <- gridExtra::grid.arrange(
+  title_grob,
+  GG_PLOTS_REGISTER[['dis_datasets']], GG_PLOTS_REGISTER[['dis_metrics']], GG_PLOTS_REGISTER[['dis_models']],
+  layout_matrix = layout,
+  heights       = c(1, 10, 10)  # tweak these ratios to taste
+)
+
+ggsave(
+  "fig-mv-datasets-models-met-pie.pdf",
+  plot = combined_plot,
+  width = 14,
+  height = 8
+)
+```
+
+```{r 118}
+plot(combined_plot)
+```
+
+## Validation procedure
+
+```{r 119}
+GG_PLOTS_REGISTER <- list()
+
+# Rename the columns to make them easier to work with
+df_renamed <- multiview_df %>%
+  rename(
+    test_set_used = 'Was a test set or cross-validation procedure used to determine the performance metrics values? Please write only yes, or no.',
+    statistical_tests = 'Were statistical tests used? Please write only yes, or no.',
+    other_analysis_methods = 'Did other methods of analyzing the outcomes, for example Bayesian, explainable machine learning methods, be used? Please write yes, or no.',
+    ablation_studies = 'Were ablation studies and/or comparisons with unimodal classifiers performed? Please write yes, or no.',
+    replication_info = 'Did the authors provide enough information (data, code) to allow for replication of the study? Please write only yes, or no.'
+  )
+
+# Clean and standardize responses - convert everything to lower case and handle variations
+df_clean <- df_renamed %>%
+  mutate(across(
+    c(
+      test_set_used,
+      statistical_tests,
+      other_analysis_methods,
+      ablation_studies,
+      replication_info
+    ),
+    ~ case_when(
+      tolower(.) %in% c("yes", "y") ~ "Yes",
+      tolower(.) %in% c("no", "n") ~ "No",
+      is.na(.) ~ "No",
+      TRUE ~ "No"
+    )
+  ))
+
+# Create better titles for each column
+title_mapping <- c(
+  "test_set_used" = "Test Set or Cross-Validation Used",
+  "statistical_tests" = "Statistical Tests Used",
+  "other_analysis_methods" = "Alternative Analysis Methods Used",
+  "ablation_studies" = "Ablation Studies Performed",
+  "replication_info" = "Replication Information Provided"
+)
+```
+
+```{r 120}
+summary_df <- create_summary_df(df_clean, 'test_set_used')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['test_set_used'], global_palette = global_palette)
+
+ggsave(
+  "fig-mv-eval-test-set-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['test_set_used']] <- ggplot_chart
+```
+
+```{r 121}
+ggplot_chart
+```
+
+```{r 122}
+knitr::kable(summary_df, caption = title_mapping['test_set_used']) %>% kableExtra::kable_styling()
+```
+
+```{r 12321313}
+summary_df <- create_summary_df(df_clean, 'statistical_tests')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['statistical_tests'], global_palette = global_palette)
+  
+ggsave("fig-mv-eval-stat-test-pie.pdf", plot = ggplot_chart, width = 14, height = 8)
+
+GG_PLOTS_REGISTER[['statistical_tests']] <- ggplot_chart
+```
+
+```{r 124}
+ggplot_chart
+```
+
+```{r 125}
+knitr::kable(summary_df, caption = title_mapping['statistical_tests']) %>% kableExtra::kable_styling()
+```
+
+```{r 126}
+summary_df <- create_summary_df(df_clean, 'other_analysis_methods')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['other_analysis_methods'], global_palette = global_palette)
+
+ggsave(
+  "fig-mv-eval-other-test-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['other_analysis_methods']] <- ggplot_chart
+```
+
+```{r 127}
+ggplot_chart
+```
+
+```{r 128}
+knitr::kable(summary_df, caption = title_mapping['other_analysis_methods']) %>% kableExtra::kable_styling()
+```
+
+```{r 129}
+summary_df <- create_summary_df(df_clean, 'ablation_studies')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['ablation_studies'], global_palette = global_palette)
+
+ggsave(
+  "fig-mv-eval-ablation-study-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['ablation_studies']] <- ggplot_chart
+```
+
+```{r 130}
+ggplot_chart
+```
+
+```{r 131}
+knitr::kable(summary_df, caption = title_mapping['ablation_studies']) %>% kableExtra::kable_styling()
+```
+
+```{r 132}
+summary_df <- create_summary_df(df_clean, 'replication_info')
+global_palette <- stats::setNames(grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+                                  unique(summary_df$group))
+ggplot_chart <- create_pie_chart(summary_df, title_mapping['replication_info'], global_palette = global_palette)
+
+ggsave(
+  "fig-mv-eval-replication-pie.pdf",
+  plot = ggplot_chart,
+  width = 14,
+  height = 8
+)
+
+GG_PLOTS_REGISTER[['replication_info']] <- ggplot_chart
+```
+
+```{r 133}
+ggplot_chart
+```
+
+```{r 134}
+knitr::kable(summary_df, caption = title_mapping['replication_info']) %>% kableExtra::kable_styling()
+```
+
+### All plots
+
+```{r 135}
+# Pie charts of studies evaluation & replication
+wrapped_title <- stringr::str_wrap(
+  "",
+  width = 60
+)
+
+title_grob <- grid::textGrob(wrapped_title,
+                             gp = grid::gpar(fontsize = 14, fontface = "plain"),
+                             just = "center")
+
+layout <- rbind(
+  c(1, NA, 2),  # Top row: plot 1, empty, plot 2
+  c(NA, 3, NA), # Middle row: empty, plot 3, empty
+  c(4, NA, 5)   # Bottom row: plot 4, empty, plot 5
+)
+
+combined_plot <- gridExtra::grid.arrange(
+  GG_PLOTS_REGISTER[['test_set_used']],      # position 1: top-left
+  GG_PLOTS_REGISTER[['statistical_tests']],  # position 2: top-right
+  GG_PLOTS_REGISTER[['other_analysis_methods']], # position 3: middle-center
+  GG_PLOTS_REGISTER[['ablation_studies']],   # position 4: bottom-left
+  GG_PLOTS_REGISTER[['replication_info']],   # position 5: bottom-right
+  layout_matrix = layout
+)
+
+combined_plot <- gridExtra::grid.arrange(
+  title_grob,
+  combined_plot,
+  ncol = 1,
+  heights = c(0.5, 10)  # Title takes less space than the plots
+)
+
+ggsave(
+  "fig-mv-eval-test-set-tests-abl-rep-pie.pdf",
+  plot = combined_plot,
+  width = 14,
+  height = 8
+)
+```
+
+```{r 136}
+plot(combined_plot)
+```
+
+# References
+
+```{r}
+# Helper function to format authors
+format_authors <- function(authors_field) {
+  # Handle different input types
+  if (is.null(authors_field) || length(authors_field) == 0) return("")
+  
+  # If it's a list, extract the first element
+  if (is.list(authors_field)) {
+    if (length(authors_field[[1]]) == 0) return("")
+    authors_str <- authors_field[[1]]
+  } else {
+    authors_str <- authors_field
+  }
+  
+  # Handle vectors - take first non-NA element
+  if (length(authors_str) > 1) {
+    authors_str <- authors_str[1]
+  }
+  
+  # Check if it's NA or empty - handle single element only
+  if (length(authors_str) == 0 || is.na(authors_str[1]) || authors_str[1] == "") return("")
+  
+  # Convert to character if needed
+  authors_str <- as.character(authors_str[1])
+  
+  # Split authors and format as "First Initial. Last Name"
+  authors <- strsplit(authors_str, " and ")[[1]]
+  
+  formatted_authors <- sapply(authors, function(author) {
+    author <- trimws(author)  # Clean whitespace
+    
+    # Handle "Last, First" format
+    if (grepl(",", author)) {
+      parts <- strsplit(author, ",")[[1]]
+      last_name <- trimws(parts[1])
+      first_name <- trimws(parts[2])
+      
+      # Get first initial(s) - handle middle names too
+      name_parts <- strsplit(first_name, " ")[[1]]
+      initials <- sapply(name_parts, function(name) {
+        if (nchar(trimws(name)) > 0) {
+          paste0(substr(trimws(name), 1, 1), ".")
+        } else {
+          ""
+        }
+      })
+      initials <- paste(initials[initials != ""], collapse = " ")
+      
+      return(paste0(initials, " ", last_name))
+    } else {
+      # Handle "First Last" format
+      parts <- strsplit(trimws(author), " ")[[1]]
+      if (length(parts) >= 2) {
+        # First name initial(s)
+        first_parts <- parts[1:(length(parts)-1)]
+        initials <- sapply(first_parts, function(name) {
+          if (nchar(trimws(name)) > 0) {
+            paste0(substr(trimws(name), 1, 1), ".")
+          } else {
+            ""
+          }
+        })
+        initials <- paste(initials[initials != ""], collapse = " ")
+        
+        # Last name
+        last_name <- parts[length(parts)]
+        return(paste0(initials, " ", last_name))
+      }
+      return(author)  # Return as-is if can't parse
+    }
+  })
+  
+  return(paste(formatted_authors, collapse = ", "))
+}
+
+safe_extract <- function(field) {
+  if (is.null(field)) return("")
+  if (is.list(field)) {
+    if (length(field) == 0 || length(field[[1]]) == 0) return("")
+    result <- field[[1]][1]
+  } else {
+    if (length(field) == 0) return("")
+    result <- field[1]
+  }
+  
+  if (is.na(result)) return("")
+  return(as.character(result))
+}
+
+# Format journal article
+format_article <- function(authors, title, year, entry, doi) {
+  journal <- safe_extract(entry$JOURNAL)
+  volume <- safe_extract(entry$VOLUME)
+  pages <- safe_extract(entry$PAGES)
+  number <- safe_extract(entry$NUMBER)
+  
+  # Check if it's an article number format (e.g., e00205)
+  is_article_number <- pages != "" && grepl("^e[0-9]+", pages)
+  
+  if (is_article_number) {
+    # Format with article number
+    ref <- paste0(authors, ", ", year, ". ", title, ". ", journal, ". ", volume, ", ", pages, ".")
+  } else {
+    # Standard format
+    volume_info <- if (volume != "") paste0(" ", volume) else ""
+    page_info <- if (pages != "") paste0(" ", gsub("-", " – ", pages)) else ""
+    ref <- paste0(authors, ", ", title, ", ", journal, volume_info, " (", year, ")", page_info, ".")
+  }
+  
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+# Format book
+format_book <- function(authors, title, year, entry) {
+  publisher <- safe_extract(entry$PUBLISHER)
+  address <- safe_extract(entry$ADDRESS)
+  edition <- safe_extract(entry$EDITION)
+  
+  edition_text <- if (edition != "") paste0(edition, " ed., ") else ""
+  location <- if (address != "") paste0(", ", address) else ""
+  
+  ref <- paste0(authors, ", ", title, ", ", edition_text, publisher, location, ", ", year, ".")
+  return(ref)
+}
+
+# Format book chapter
+format_chapter <- function(authors, title, year, entry) {
+  booktitle <- safe_extract(entry$BOOKTITLE)
+  editor <- format_authors(entry$EDITOR)
+  publisher <- safe_extract(entry$PUBLISHER)
+  address <- safe_extract(entry$ADDRESS)
+  pages <- safe_extract(entry$PAGES)
+  
+  editor_text <- if (editor != "") paste0("in: ", editor, " (Eds.), ") else ""
+  location <- if (address != "") paste0(", ", address) else ""
+  page_info <- if (pages != "") paste0(", pp. ", gsub("-", " - ", pages)) else ""
+  
+  ref <- paste0(authors, ", ", title, ", ", editor_text, booktitle, ", ", 
+                publisher, location, ", ", year, page_info, ".")
+  return(ref)
+}
+
+# Format miscellaneous (websites, datasets)
+format_misc <- function(authors, title, year, entry, url, doi) {
+  howpublished <- safe_extract(entry$HOWPUBLISHED)
+  note <- safe_extract(entry$NOTE)
+  
+  # Detect if it's a website or dataset
+  is_dataset <- grepl("dataset|data", paste(title, howpublished, note), ignore.case = TRUE)
+  
+  if (is_dataset) {
+    ref <- paste0(authors, ", ", title, " [dataset], ", howpublished, ", ", year, ".")
+    if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  } else {
+    # Website format
+    access_info <- if (note != "") paste0(" (", note, ")") else ""
+    ref <- paste0(authors, ", ", title, ". ", url, ", ", year, access_info, ".")
+  }
+  
+  return(ref)
+}
+
+# Format software
+format_software <- function(authors, title, year, entry, doi) {
+  howpublished <- safe_extract(entry$HOWPUBLISHED)
+  version <- safe_extract(entry$VERSION)
+  note <- safe_extract(entry$NOTE)
+  
+  version_text <- if (version != "") paste0(" ", version) else ""
+  date_info <- if (note != "") paste0(", ", note) else ""
+  
+  ref <- paste0(authors, ", ", title, version_text, " [software], ", 
+                howpublished, date_info, ", ", year, ".")
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+
+# Default format
+format_default <- function(authors, title, year, entry, doi, url) {
+  ref <- paste0(authors, ", ", title, " (", year, ").")
+  if (url != "") ref <- paste0(ref, " ", url, ".")
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+format_proceedings <- function(authors, title, year, entry, doi) {
+  booktitle <- safe_extract(entry$BOOKTITLE)
+  pages <- safe_extract(entry$PAGES)
+  publisher <- safe_extract(entry$PUBLISHER)
+  address <- safe_extract(entry$ADDRESS)
+  
+  location <- if (address != "") paste0(", ", address) else ""
+  page_info <- if (pages != "") paste0(", pp. ", gsub("-", " – ", pages)) else ""
+  publisher_info <- if (publisher != "") paste0(", ", publisher) else ""
+  
+  ref <- paste0(authors, ", ", title, ", in: ", booktitle, publisher_info, 
+                location, ", ", year, page_info, ".")
+  
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+format_bibliography <- function(bib_df) {
+  if (is.null(bib_df) || nrow(bib_df) == 0) {
+    return("No bibliography entries found.")
+  }
+  
+  formatted_refs <- character(nrow(bib_df))
+  
+  for (i in 1:nrow(bib_df)) {
+    entry <- bib_df[i, ]
+    ref_type <- tolower(safe_extract(entry$CATEGORY))
+    
+    # Extract common fields safely
+    bibtexkey <- entry$BIBTEXKEY
+    authors <- format_authors(entry$AUTHOR)
+    title <- safe_extract(entry$TITLE)
+    year <- safe_extract(entry$YEAR)
+    doi <- safe_extract(entry$DOI)
+    if (doi != "") doi <- paste0("https://doi.org/", doi)
+    url <- safe_extract(entry$URL)
+    
+    # Format based on entry type
+    formatted_ref <- tryCatch({
+      switch(ref_type,
+        "article" = format_article(authors, title, year, entry, doi),
+        "book" = format_book(authors, title, year, entry),
+        "incollection" = ,
+        "inbook" = format_chapter(authors, title, year, entry),
+        "inproceedings" = format_proceedings(authors, title, year, entry, doi),
+        "misc" = format_misc(authors, title, year, entry, url, doi),
+        "techreport" = ,
+        "manual" = format_software(authors, title, year, entry, doi),
+        # Default format
+        format_default(authors, title, year, entry, doi, url)
+      )
+    }, error = function(e) {
+      # Fallback format if there's an error
+      paste0(authors, ", ", title, " (", year, ").")
+    })
+    
+    formatted_refs[i] <- paste0("[", i, "] ", "[", bibtexkey, "] ", formatted_ref)
+  }
+  
+  return(paste(formatted_refs, collapse = "\n\n"))
+}
+
+```
+
+```{r}
+# Load and format bibliography
+bibligraphy <- load_bibliography('./bibtex-information-fusion-document-classification.bib')
+formatted_bibliography <- format_bibliography(bibligraphy)
+cat(formatted_bibliography[1])
+```

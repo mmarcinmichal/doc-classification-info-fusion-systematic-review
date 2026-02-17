@@ -1,0 +1,4121 @@
+---
+title: "Analysis of Multi-view and Multi-modal Classification Approaches: Quantitative analysis"
+author: "Marcin Mirończuk (<marcin.mironczuk@opi.org.pl>)"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  bookdown::html_document2:
+    self_contained: true
+    number_sections: true
+    toc: true
+    toc_depth: 5
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+bibliography: ./bibtex-information-fusion-document-classification.bib
+---
+
+```{r chunks, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Introduction
+
+Load required libraries
+
+```{r settings, echo = T,  message = FALSE}
+options(warn = -1)
+
+options(encoding = "UTF-8")
+
+# Clear workspace
+rm(list = ls())
+
+# Set language to En
+Sys.setlocale(category = "LC_ALL", locale = "english")
+
+# Installing and loading libraries
+libraries <- c("readxl",
+               "dplyr",
+               "tidyr",
+               "stringr",
+               "ggplot2",
+               "effsize",
+               "reshape2",
+               "tidyverse", 
+               "treemapify",
+               "car",
+               "MASS",
+               "patchwork",
+               "effectsize",
+               "gridExtra",
+               "metafor",
+               "kableExtra",
+               "ggsci",
+               "colorspace")
+
+if (length(setdiff(libraries, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(libraries, rownames(installed.packages())), dependencies = T)
+}
+
+sapply(libraries, function(libName) {
+  library(libName, character.only = TRUE)
+})
+
+# Information about session
+sessionInfo()
+```
+
+```{r functions, echo = T,  message = FALSE}
+# Define a function to standardize values to 0-100 range
+convert_to_percentage <- function(x) {
+  if (is.na(x))
+    return(NA)
+  
+  # Convert to character and replace comma with dot
+  x_str <- as.character(x)
+  x_str <- gsub(",", ".", x_str)
+  
+  # Convert to numeric
+  x_num <- as.numeric(x_str)
+  
+  # Scale to 0-100 range
+  if (!is.na(x_num) && x_num >= 0 && x_num <= 1) {
+    return(x_num * 100)  # Convert 0-1 to 0-100
+  } else {
+    return(x_num)  # Already in 0-100 range or NA
+  }
+}
+environment(convert_to_percentage) <- new.env(parent = baseenv())
+
+
+summary_stats <- function(data_clean) {
+  lapply(data_clean, function(x) {
+    data.frame(
+      Count = sum(!is.na(x)),
+      Min = min(x, na.rm = TRUE),
+      Q1 = stats::quantile(x, 0.25, na.rm = TRUE),
+      Median = stats::median(x, na.rm = TRUE),
+      Mean = mean(x, na.rm = TRUE),
+      Q3 = stats::quantile(x, 0.75, na.rm = TRUE),
+      Max = max(x, na.rm = TRUE),
+      SD = stats::sd(x, na.rm = TRUE)
+    )
+  })
+}
+environment(summary_stats) <- new.env(parent = baseenv())
+
+# Updated function to create a box plot for a single column
+create_boxplot <- function(data, col_name, global_palette) {
+  # Extract non-NA values
+  values <- data[[col_name]][!is.na(data[[col_name]])]
+  
+  # No-data fallback
+  if (length(values) == 0) {
+    return(ggplot2::ggplot() +
+             ggplot2::annotate(
+               "text",
+               x = 0.5,
+               y = 0.5,
+               label = "No data available"
+             ) +
+             ggplot2::theme_void())
+  }
+  
+  # Prepare for plotting
+  plot_data <- data.frame(x     = factor(col_name), Value = values)
+  
+  # Single‐column boxplot with its palette color
+  ggplot2::ggplot(plot_data, ggplot2::aes(x = x, y = Value)) +
+    ggplot2::geom_boxplot(fill = global_palette[[col_name]]) +
+    ggplot2::stat_summary(
+      fun   = mean,
+      geom  = "point",
+      shape = 18,
+      size  = 3,
+      color = "darkred"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(title = paste("Distribution of", gsub("_", " ", col_name)),
+         x     = NULL,
+         y     = "Value") +
+    ggplot2::theme(
+      plot.title   = ggplot2::element_text(size = 10, hjust = 0.5),
+      axis.text.x  = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank()
+    )
+}
+environment(create_boxplot) <- new.env(parent = baseenv())
+
+# Function to extract test info including effect size
+get_wilcox_stats <- function(metric, data) {
+  # Generate column names
+  combo_col <- paste0(metric, ".view.combinations.text")
+  single_col <- paste0(metric, ".view.single.text")
+  
+  # Get valid pairs
+  valid <- !is.na(data[[combo_col]]) & !is.na(data[[single_col]])
+  n_valid <- sum(valid)
+  
+  if (n_valid < 3 ||
+      !all(c(combo_col, single_col) %in% names(data))) {
+    return(c(
+      V = NA,
+      p = NA,
+      z = NA,
+      r = NA,
+      n = 0
+    ))
+  }
+  
+  # Run test
+  test <- stats::wilcox.test(data[[combo_col]][valid], data[[single_col]][valid], paired = TRUE)
+  
+  # Extract V and p
+  V <- as.numeric(test$statistic)
+  p <- test$p.value
+  
+  # Calculate z and effect size r
+  z <- abs(stats::qnorm(p / 2))
+  r <- z / sqrt(n_valid)
+  
+  return(c(
+    V = V,
+    p = p,
+    z = z,
+    r = r,
+    n = n_valid
+  ))
+}
+environment(get_wilcox_stats) <- new.env(parent = baseenv())
+
+# Create a function to analyze differences for a given metric
+analyze_differences <- function(metric, data) {
+  # Create column names
+  combo_col <- paste0(metric, ".view.combinations.text")
+  single_col <- paste0(metric, ".view.single.text")
+  
+  # Check if columns exist
+  if (!all(c(combo_col, single_col) %in% names(data))) {
+    cat("\nColumns for", metric, "not found in the data\n")
+    return(NULL)
+  }
+  
+  # Calculate differences
+  diff <- data[[combo_col]] - data[[single_col]]
+  
+  # Calculate percentage of positive differences
+  percent_positive <- mean(diff > 0, na.rm = TRUE) * 100
+  cat(
+    "\n",
+    metric,
+    "- ",
+    percent_positive,
+    "% of pairs show combination view > single view\n",
+    sep = ""
+  )
+  
+  # Calculate median difference
+  median_diff <- stats::median(diff, na.rm = TRUE)
+  cat(metric, "- Median difference:", median_diff, "\n", sep = "")
+  
+  # Create a histogram of differences
+  hist_title <- paste("Histogram of",
+                      toupper(metric),
+                      "Differences (Combination - Single)")
+  graphics::hist(
+    diff,
+    main = hist_title,
+    xlab = paste(metric, "Difference"),
+    breaks = 20,
+    col = "skyblue",
+    border = "white"
+  )
+  
+  # Add a vertical line at zero for reference
+  graphics::abline(
+    v = 0,
+    col = "red",
+    lwd = 2,
+    lty = 2
+  )
+  
+  # Add a vertical line at the median
+  graphics::abline(v = median_diff,
+         col = "blue",
+         lwd = 2)
+  
+  # Add a legend
+  graphics::legend(
+    "topright",
+    legend = c("Zero difference", paste("Median =", round(median_diff, 4))),
+    col = c("red", "blue"),
+    lty = c(2, 1),
+    lwd = 2
+  )
+  
+  # Return the differences for potential further analysis
+  return(diff)
+}
+environment(analyze_differences) <- new.env(parent = baseenv())
+
+# Define the summary statistics function for grouped data
+summary_stats_grouped <- function(x) {
+  base::data.frame(
+    Count = base::sum(!is.na(x)),
+    Min = ifelse(base::sum(!is.na(x)) > 0, base::min(x, na.rm = TRUE), NA),
+    Q1 = ifelse(base::sum(!is.na(x)) > 0, stats::quantile(x, 0.25, na.rm = TRUE), NA),
+    Median = ifelse(base::sum(!is.na(x)) > 0, stats::median(x, na.rm = TRUE), NA),
+    Mean = ifelse(base::sum(!is.na(x)) > 0, base::mean(x, na.rm = TRUE), NA),
+    Q3 = ifelse(base::sum(!is.na(x)) > 0, stats::quantile(x, 0.75, na.rm = TRUE), NA),
+    Max = ifelse(base::sum(!is.na(x)) > 0, base::max(x, na.rm = TRUE), NA),
+    SD = ifelse(base::sum(!is.na(x)) > 1, stats::sd(x, na.rm = TRUE), NA)
+  )
+}
+environment(summary_stats_grouped) <- new.env(parent = baseenv())
+
+# Updated function to create a box plot for a single metric and statistic
+create_summary_boxplot <- function(data, metric_name, stat_type, global_palette) {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Extract non-NA values for the specific metric and statistic
+  values <- data %>%
+    dplyr::filter(Metric == metric_name & statistic == stat_type & !is.na(value)) %>%
+    dplyr::pull(value)
+  
+  # No-data fallback
+  if (base::length(values) == 0) {
+    return(ggplot2::ggplot() +
+             ggplot2::annotate(
+               "text",
+               x = 0.5,
+               y = 0.5,
+               label = "No data available",
+               size = 4
+             ) +
+             ggplot2::theme_void() +
+             ggplot2::labs(title = base::paste(stat_type, "of", base::gsub("_", " ", metric_name))))
+  }
+  
+  # Prepare for plotting
+  plot_data <- base::data.frame(
+    x = base::factor(base::paste(stat_type, metric_name, sep = "_")), 
+    Value = values
+  )
+  
+  # Single-column boxplot with its palette color
+  ggplot2::ggplot(plot_data, ggplot2::aes(x = x, y = Value)) +
+    ggplot2::geom_boxplot(fill = global_palette[[metric_name]], alpha = 0.8) +
+    ggplot2::geom_jitter(width = 0.1, alpha = 0.5, size = 1, color = "grey40") +
+    ggplot2::stat_summary(
+      fun = mean,
+      geom = "point",
+      shape = 18,
+      size = 3,
+      color = "darkred"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(
+      title = base::paste(stat_type, "of", base::gsub("_", " ", metric_name)),
+      x = NULL,
+      y = "Value"
+    ) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 10, hjust = 0.5, face = "bold"),
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank()
+    )
+}
+environment(create_summary_boxplot) <- new.env(parent = baseenv())
+
+# Enhanced version with consistent y-axis scales
+create_summary_boxplot_scaled <- function(data, metric_name, stat_type, y_limits = NULL, global_palette) {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Extract non-NA values for the specific metric and statistic
+  values <- data %>%
+    dplyr::filter(Metric == metric_name & statistic == stat_type & !is.na(value)) %>%
+    dplyr::pull(value)
+  
+  # No-data fallback
+  if (base::length(values) == 0) {
+    p <- ggplot2::ggplot() +
+      ggplot2::annotate("text", x = 0.5, y = 0.5, label = "No data available", size = 4) +
+      ggplot2::theme_void() +
+      ggplot2::labs(title = base::paste(stat_type, "of", base::gsub("_", " ", metric_name)))
+    
+    if (!is.null(y_limits)) p <- p + ggplot2::coord_cartesian(ylim = y_limits)
+    return(p)
+  }
+  
+  # Prepare for plotting
+  plot_data <- base::data.frame(
+    x = base::factor(base::paste(stat_type, metric_name, sep = "_")), 
+    Value = values
+  )
+  
+  # Single-column boxplot
+  p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = x, y = Value)) +
+    ggplot2::geom_boxplot(fill = global_palette[[metric_name]], alpha = 0.8) +
+    ggplot2::geom_jitter(width = 0.1, alpha = 0.5, size = 1, color = "grey40") +
+    ggplot2::stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "darkred") +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(
+      title = base::paste(stat_type, "of", base::gsub("_", " ", metric_name)), 
+      x = NULL, 
+      y = "Difference in Performance (Percentage Points)") +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 10, hjust = 0.5, face = "bold"),
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank()
+    )
+  
+  if (!is.null(y_limits)) p <- p + ggplot2::coord_cartesian(ylim = y_limits)
+  return(p)
+}
+environment(create_summary_boxplot_scaled) <- new.env(parent = baseenv())
+
+preprocess_for_plotting <- function(long_data) {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  processed_data <- long_data %>%
+    # Use 'str_extract' to find the core metric name in the messy string
+    dplyr::mutate(
+      Metric = dplyr::case_when(
+        stringr::str_detect(Metric, "^(acc)")     ~ "Accuracy",
+        stringr::str_detect(Metric, "^(f1score)") ~ "F1 Score",
+        stringr::str_detect(Metric, "^(rec)")     ~ "Recall",
+        stringr::str_detect(Metric, "^(prec)")    ~ "Precision",
+        TRUE                          ~ NA_character_ # Handle cases that don't match
+      ),
+      # Capitalize the statistic for cleaner facet labels
+      statistic = stringr::str_to_title(statistic)
+    ) %>%
+    
+    # Remove any rows where a metric couldn't be identified
+     dplyr::filter(!is.na(Metric)) %>%
+    
+    # Rename the 'value' column to be more descriptive for the plot
+    dplyr::rename(Difference = value) %>%
+
+    # Select only the columns we need for plotting
+    dplyr::select(bibtex, Metric, statistic, Difference)
+  
+  return(processed_data)
+}
+environment(preprocess_for_plotting) <- new.env(parent = baseenv())
+
+
+create_faceted_plot <- function(processed_data, palette, title = "Performance Gain of Multiview over Singleview Approaches", subtitle = "Distribution of study-level summary differences (Multiview − Singleview)") {
+  
+  # Ensure Metric is a factor to control plotting order
+  metric_levels <- names(palette)
+  processed_data$Metric <- factor(processed_data$Metric, levels = metric_levels)
+  
+  p <- ggplot2::ggplot(processed_data, ggplot2::aes(x = Metric, y = Difference)) +
+    
+    # Facet by the 'statistic' column (Mean vs. Median)
+    ggplot2::facet_wrap(~ statistic, ncol = 1, scales = "free_y") +
+    
+    # Critical zero line
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "darkred", size = 0.8) +
+    
+    # Boxplot using the color palette
+    ggplot2::geom_boxplot(ggplot2::aes(fill = Metric), alpha = 0.8, outlier.shape = NA) +
+    
+    # Jitter plot showing the distribution of study-level means/medians
+    ggplot2::geom_jitter(width = 0.2, alpha = 0.5, color = "black", size = 1.5) +
+    
+    # Apply the custom color palette
+    ggplot2::scale_fill_manual(values = palette) +
+    
+    # Labels and Title
+    ggplot2::labs(
+      title = title,
+      subtitle = subtitle,
+      x = NULL,
+      y = "Difference in Performance (Percentage Points)"
+    ) +
+    
+    # Professional Theming
+    ggplot2::theme_bw(base_size = 14) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 16),
+      plot.subtitle = ggplot2::element_text(size = 12),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      strip.background = ggplot2::element_rect(fill = "grey90", color = "grey90"),
+      strip.text = ggplot2::element_text(face = "bold"),
+      legend.position = "none"
+    )
+  
+  return(p)
+}
+environment(create_faceted_plot) <- new.env(parent = baseenv())
+
+# Function to create similar plots for any metric
+create_normality_plots <- function(data, metric_name, global_palette) {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Filter data
+  filtered_data <- data %>%
+    dplyr::filter(statistic == 'Mean') %>%
+    dplyr::filter(Metric == metric_name)
+  
+  if (nrow(filtered_data) == 0) {
+    return(ggplot2::ggplot() + 
+           ggplot2::annotate("text", x = 0.5, y = 0.5, label = "No data available") +
+           ggplot2::theme_void())
+  }
+  
+  # Create histogram
+  hist_plot <- ggplot2::ggplot(filtered_data, ggplot2::aes(x = value)) +
+    ggplot2::geom_histogram(ggplot2::aes(y = ggplot2::after_stat(density)), 
+                   bins = min(8, max(3, nrow(filtered_data)/2)), 
+                   fill = global_palette[[metric_name]], 
+                   alpha = 0.7, 
+                   color = "white") +
+    ggplot2::geom_density(color = "darkblue", linewidth = 1.2, alpha = 0.8) +
+    ggplot2::labs(title = "Distribution", x = "Mean Values", y = "Density") +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(plot.title = ggplot2::element_text(size = 11, hjust = 0.5, face = "bold"),
+          panel.grid.minor = ggplot2::element_blank()) +
+    ggplot2::geom_vline(xintercept = mean(filtered_data$value), 
+               color = "red", linetype = "dashed")
+  
+  # Create Q-Q plot
+  qq_plot <- ggplot2::ggplot(filtered_data, ggplot2::aes(sample = value)) +
+    ggplot2::stat_qq(color = global_palette[[metric_name]], size = 2, alpha = 0.7) +
+    ggplot2::stat_qq_line(color = "darkblue", linewidth = 1.2) +
+    ggplot2::labs(title = "Q-Q Plot", x = "Theoretical Quantiles", y = "Sample Quantiles") +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(plot.title = ggplot2::element_text(size = 11, hjust = 0.5, face = "bold"),
+          panel.grid.minor = ggplot2::element_blank())
+  
+  # Combine plots
+  combined <- hist_plot | qq_plot
+  
+  # Add Shapiro test if enough data
+  if (nrow(filtered_data) >= 3) {
+    shapiro_result <- stats::shapiro.test(filtered_data$value)
+    subtitle_text <- sprintf("%s | n=%d | SW p=%.4f | Normal: %s", 
+                            gsub("_", " ", metric_name),
+                            nrow(filtered_data),
+                            shapiro_result$p.value,
+                            ifelse(shapiro_result$p.value > 0.05, "Yes", "No"))
+  } else {
+    subtitle_text <- sprintf("%s | n=%d | Insufficient data for SW test", 
+                            gsub("_", " ", metric_name),
+                            nrow(filtered_data))
+  }
+  
+  final <- combined +
+    patchwork::plot_annotation(subtitle = subtitle_text,
+                   theme = ggplot2::theme(plot.subtitle = ggplot2::element_text(size = 10, hjust = 0.5)))
+  
+  return(final)
+}
+environment(create_normality_plots) <- new.env(parent = baseenv())
+
+# Function to perform one-sample permutation test for the mean
+get_permutation_stats <- function(metric_name, data, n_permutations = 9999) {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Set a seed for reproducibility of the random permutations
+  set.seed(42)
+  
+  # Filter data for the specific metric and extract the difference values
+  metric_data <- data %>%
+    dplyr::filter(Metric == metric_name & statistic == "Mean") %>%
+    dplyr::pull(value)
+  
+  # Remove NA values for the test
+  metric_data <- metric_data[!is.na(metric_data)]
+  n_valid <- length(metric_data)
+  
+  # Check if we have enough data to perform the test
+  if (n_valid < 3) {
+    return(c(
+      observed_mean = mean(metric_data),
+      p_value = NA,
+      cohens_d = NA,
+      n = n_valid
+    ))
+  }
+  
+  # 1. Calculate the observed test statistic (the mean of the differences)
+  observed_mean <- mean(metric_data)
+  
+  # 2. Generate the null distribution by permuting (flipping signs)
+  permuted_means <- replicate(n_permutations, {
+    # Randomly assign signs (+1 or -1) to each observation
+    flipped_signs <- sample(c(-1, 1), size = n_valid, replace = TRUE)
+    permuted_sample <- metric_data * flipped_signs
+    
+    # Calculate the mean of this permuted sample
+    mean(permuted_sample)
+  })
+  
+  # 3. Calculate the two-sided p-value
+  # Count how many permuted means are as or more extreme than the observed mean
+  extreme_count <- sum(abs(permuted_means) >= abs(observed_mean))
+  p_value <- (extreme_count + 1) / (n_permutations + 1)
+  
+  # 4. Calculate effect size: Cohen's d for one-sample t-test
+  # (Mean of differences / Standard Deviation of differences)
+  sd_diff <- stats::sd(metric_data)
+  cohens_d <- if (sd_diff == 0) 0 else observed_mean / sd_diff
+  
+  # Return all statistics
+  return(c(
+    observed_mean = observed_mean,
+    p_value = p_value,
+    cohens_d = cohens_d,
+    n = n_valid
+  ))
+}
+environment(get_permutation_stats) <- new.env(parent = baseenv())
+
+get_wilcox_stats_corrected <- function(metric_name, data) {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Filter data for the specific metric
+  metric_data <- data %>%
+    dplyr::filter(Metric == metric_name & statistic == "Mean") %>%
+    dplyr::pull(value)
+  
+  n_valid <- length(metric_data[!is.na(metric_data)])
+  
+  if (n_valid < 3) {
+    return(c(V = NA, p = NA, r = NA, n_valid = n_valid))
+  }
+  
+  # Run the test
+  test <- stats::wilcox.test(metric_data, mu = 0, alternative = "two.sided")
+  
+  # Calculate effect size r (rank-biserial correlation)
+  # The effect size package handles the calculation properly from the test object
+  # Note: The output is a data frame, so we pull the value
+  r_effect <- effectsize::rank_biserial(metric_data, mu = 0)
+  
+  return(c(
+    V = as.numeric(test$statistic),
+    p = test$p.value,
+    r = r_effect$r_rank_biserial, # Extract the correct effect size
+    n = n_valid,
+    CI = r_effect$CI,
+    CI_Lower = r_effect$CI_low,
+    CI_Upper = r_effect$CI_high,
+    Mean_Difference = mean(metric_data),
+    Median_Difference = stats::median(metric_data)
+  ))
+}
+environment(get_wilcox_stats_corrected) <- new.env(parent = baseenv())
+
+# Function to aggregate data per article and prepare for Cliff's delta
+prepare_cliff_data <- function(metric, data, aggregation_method = "mean", single_col = ".view.single.text", combo_col = ".view.combinations.text") {
+  # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Generate column names
+  single_col <- paste0(metric, single_col)
+  combo_col <- paste0(metric, combo_col)
+  
+  # Check if columns exist
+  if (!all(c(single_col, combo_col) %in% names(data))) {
+    return(NULL)
+  }
+  
+  # Validate aggregation method
+  if (!aggregation_method %in% c("mean", "median")) {
+    stop("aggregation_method must be either 'mean' or 'median'")
+  }
+  
+  # Choose aggregation function
+  agg_func <- switch(aggregation_method,
+                     "mean" = function(x) mean(x, na.rm = TRUE),
+                     "median" = function(x) stats::median(x, na.rm = TRUE))
+  
+  # Aggregate by bibtex (paper)
+  aggregated_data <- data %>%
+    dplyr::select(bibtex, dplyr::all_of(c(single_col, combo_col))) %>%
+    tidyr::fill(bibtex, .direction = "down") %>%
+    dplyr::filter(!is.na(.data[[single_col]]) & !is.na(.data[[combo_col]])) %>%
+    dplyr::group_by(bibtex) %>%
+    dplyr::summarise(
+      single_view = agg_func(.data[[single_col]]),
+      combo_view = agg_func(.data[[combo_col]]),
+      .groups = "drop"
+    ) 
+  
+  return(aggregated_data)
+}
+environment(prepare_cliff_data) <- new.env(parent = baseenv())
+
+perform_meta_analysis <- function(raw_data_frame, col_comb, col_single, metric_name) {
+   # Import pipe manually
+  `%>%` <- magrittr::`%>%`
+  
+  # Data Preparation
+  # Select the two columns, filter NAs, and calculate summary stats per study.
+  paper_effects_initial <- raw_data_frame %>%
+    dplyr::select(.data[['bibtex']], dplyr::all_of(c(col_comb, col_single))) %>%
+    tidyr::drop_na(dplyr::all_of(c(col_comb, col_single))) %>%
+    dplyr::group_by(.data[['bibtex']]) %>%
+    dplyr::summarise(
+    m1i = base::mean(.data[[ col_comb ]], na.rm = TRUE),
+    m2i = base::mean(.data[[ col_single ]], na.rm = TRUE),
+    sd1i =  stats::sd(.data[[ col_comb ]], na.rm = TRUE),
+    sd2i =  stats::sd(.data[[ col_single ]], na.rm = TRUE),
+    ni   = dplyr::n(),
+    ri   = if (ni > 1) 
+             stats::cor(.data[[ col_comb ]], .data[[ col_single ]]) 
+           else                # only one pair -> no cor available
+             0.5,              # plug-in “moderate” value
+    .groups = "drop"
+  )
+  
+  # Isolate and Correct Problematic Studies
+  # Find studies where correlation failed. This identifies the "one-to-many" issue.
+  studies_to_fix <- paper_effects_initial %>%
+    dplyr::filter(is.na(ri)) %>%
+    dplyr::pull(bibtex)
+
+  # Only proceed if there are studies that need fixing.
+  if (base::length(studies_to_fix) > 0) {
+    # Go back to the original data for these specific studies and recalculate
+    # using the aggregation logic.
+    corrected_effects <- raw_data_frame %>%
+      dplyr::filter(bibtex %in% studies_to_fix) %>%
+    dplyr::select(.data[['bibtex']], dplyr::all_of(c(col_comb, col_single))) %>%
+    tidyr::drop_na(dplyr::all_of(c(col_comb, col_single))) %>%
+      dplyr::group_by(bibtex) %>%
+      dplyr::summarise(
+        m1i = base::mean(.data[[ col_comb ]], na.rm = TRUE), # The single unique value for combinations
+        m2i = base::mean(.data[[ col_single ]], na.rm = TRUE),  # The average of the single values
+        sd1i = stats::sd(.data[[ col_comb ]], na.rm = TRUE),             # SD is unknown, will be imputed
+        sd2i = stats::sd(.data[[ col_single ]], na.rm = TRUE),             # SD is also unknown, will be imputed
+        ni   = 1,                   # We've collapsed this to a single data point
+        ri   = 0.5,                 # Assume a moderate correlation
+        .groups = "drop"
+      )
+
+    # Combine Good and Corrected Summaries
+    # Take the initial summaries, remove the ones we just fixed, and
+    # bind the newly corrected rows.
+    paper_effects <- paper_effects_initial %>%
+      dplyr::filter(!bibtex %in% studies_to_fix) %>%
+      dplyr::bind_rows(corrected_effects)
+
+  } else {
+    # If no studies needed fixing, just use the initial calculation.
+    paper_effects <- paper_effects_initial
+  }
+  
+  # Resolve the problem: Studies with n=1 have sd=NA
+  # Solution: Impute missing SDs with the median of non-missing SDs
+  # This is a reasonable and defensible choice.
+  median_sd1 <- stats::median(paper_effects$sd1i, na.rm = TRUE)
+  median_sd2 <- stats::median(paper_effects$sd2i, na.rm = TRUE)
+  
+  paper_effects_imputed <- paper_effects %>%
+    dplyr::mutate(
+      sd1i = ifelse(is.na(.data[['sd1i']]) | .data[['sd1i']] == 0, median_sd1, .data[['sd1i']]),
+      sd2i = ifelse(is.na(.data[['sd2i']]) | .data[['sd2i']] == 0, median_sd2, .data[['sd2i']])
+    )
+  
+  # Calculate effect sizes and their variances 
+  # This uses the escalc() function to properly calculate 'yi' (effect size) and 'vi' (sampling variance)
+  # for a paired design (mean difference).
+  dat <- metafor::escalc(measure = "MD", # Mean Difference
+                m1i = m1i, sd1i = sd1i, n1i = ni,
+                m2i = m2i, sd2i = sd2i, n2i = ni,
+                ri = ri, data = paper_effects_imputed)
+  
+  # Add study labels for the forest plot
+  dat$studylab <- paper_effects_imputed$bibtex
+  
+  # We use a random-effects model (method="REML") as it's more standard.
+  unweighted_model <- metafor::rma(yi, vi, data = dat, method = "REML", weighted = FALSE, control = list(stepadj = .5, maxiter = 1000, optimizer = "nlminb"))
+  unweighted_model_rve <- metafor::robust(unweighted_model, cluster = dat$studylab, clubSandwich = TRUE)
+  
+  # We use a random-effects model (method="REML") as it's more standard.
+  weighted_model <- metafor::rma(yi, vi, data = dat, method = "REML", control = list(stepadj = .5, maxiter = 1000, optimizer = "nlminb"))
+  weighted_model_rve <- metafor::robust(weighted_model, cluster = dat$studylab, clubSandwich = TRUE)
+  
+  # Return models for potential further analysis
+  return(list(
+    unweighted = unweighted_model,
+    unweighted_rve = unweighted_model_rve,
+    weighted = weighted_model,
+    weighted_rve = weighted_model_rve,
+    effect_sizes = dat
+  ))
+}
+environment(perform_meta_analysis) <- new.env(parent = baseenv())
+
+# Function to clean and read BibTeX file
+load_bibliography <- function(bib_file) {
+  # Read and clean the BibTeX file
+  lines <- base::readLines(bib_file, warn = FALSE)  # Suppress warnings
+  lines <- base::gsub("[^[:print:]]", "", lines)  # Remove non-printable characters
+  
+  # Write cleaned lines to a temporary file
+  temp_file <- base::tempfile(fileext = ".bib")
+  base::writeLines(lines, temp_file)
+  
+  # Read the cleaned BibTeX file
+  bib_df <- tryCatch(
+    bib2df::bib2df(temp_file),
+    error = function(e) {
+      base::message("Error reading BibTeX file: ", e$message)
+      return(NULL)
+    }
+  )
+  
+  if (is.null(bib_df))
+    return(NULL)
+  
+  return(bib_df)
+}
+environment(load_bibliography) <- new.env(parent = baseenv())
+
+
+check_publication_bias <- function(model_object, metric_name, mode_name="mv") {
+  
+  # Extract the standard RMA model
+  model <- model_object$weighted
+  k <- model$k # Number of studies
+  
+  cat(paste0("\n==============================================\n"))
+  cat(paste0("PUBLICATION BIAS ANALYSIS: ", metric_name, " (k=", k, ")\n"))
+  cat(paste0("==============================================\n"))
+  
+  # Rule of thumb: Tests are widely considered unreliable if k < 10
+  if (k < 10) {
+    cat("Skipping formal tests: Too few studies (k < 10) for reliable bias detection.\n")
+    return(NULL)
+  }
+
+  # --- A. Create Funnel Plot (Display & Save) ---
+  
+  # 1. Save to PDF (Silent background step)
+  plot_filename <- paste0("fig-", mode_name , "-funnel-", tolower(gsub(" ", "-", metric_name)), ".pdf")
+  grDevices::pdf(file = plot_filename, width = 7.42, height = 5)
+  metafor::funnel(model, 
+         main = paste0("Funnel Plot: ", metric_name, " (k=", k, ")"),
+         xlab = "Mean Difference (Percentage Points)")
+  grDevices::dev.off()
+  # Notify user that file was saved
+  cat(paste0("[File saved]: Funnel plot saved to ", plot_filename, "\n\n"))
+  
+  # 2. Draw Plot Inline (for RMarkdown)
+  metafor::funnel(model, 
+         main = paste0("Funnel Plot: ", metric_name, " (k=", k, ")"),
+         xlab = "Mean Difference (Percentage Points)")
+  
+  # --- B. Egger's Regression Test (Print Statistics) ---
+  tryCatch({
+    eggers <- metafor::regtest(model, model = "rma")
+    cat("\nEgger's Regression Test Results:\n")
+    print(eggers)
+    
+    if(eggers$pval < 0.05) {
+      cat("--> WARNING: Significant asymmetry detected (p < 0.05). Publication bias may be present.\n")
+    } else {
+      cat("--> Result: No significant asymmetry detected (p >= 0.05).\n")
+    }
+  }, error = function(e) {
+    cat("Error running Egger's test:", e$message, "\n")
+  })
+}
+environment(check_publication_bias) <- new.env(parent = baseenv())
+```
+
+# Data Parsing & Normalization
+
+## Load Excel Data
+
+```{r loadcsv}
+# File with extracted result to replication
+file <- "2-articles-information-fusion-summarisation-cleaned.xlsx"
+df_raw <- readxl::read_excel(file, sheet = "extracted-results", col_names =
+                               TRUE)
+df_raw <- as.data.frame(df_raw)
+names(df_raw) <- make.names(names(df_raw))
+
+head(df_raw)
+```
+
+## Recognizing Paper Boundaries and Row Cleaning
+
+Papers may be separated by empty lines (rows with all NA). Remove these. Only keep rows containing a bibtex key (first column not NA).
+
+```{r clean}
+# Remove rows where all columns are NA
+data_clean <- df_raw %>%
+  filter(!if_all(everything(), is.na))
+```
+
+## Data normalization
+
+Standardize values to 0-100 range.
+
+```{r converting, warning=FALSE}
+column_names <- names(data_clean)
+for (col in column_names[-1]) {
+  # Skip the first column
+  data_clean[[col]] <- sapply(data_clean[[col]], convert_to_percentage)
+}
+```
+
+# Singleview vs Multiview
+
+```{r 1}
+# Select columns to analysis
+indicators <- c(
+  "acc.view.single.text",
+  "acc.view.combinations.text",
+  "prec.view.single.text",
+  "prec.view.combinations.text",
+  "rec.view.single.text",
+  "rec.view.combinations.text",
+  "f1score.view.single.text",
+  "f1score.view.combinations.text"
+)
+```
+
+## Distribution of metrics in papers
+
+### Distribution of all metrics types in papers
+
+```{r 2}
+# For each bibtex, how many measurements did it report in total?
+measurement_counts <- data_clean %>%
+  filter(!is.na(bibtex)) %>%
+  # gather into long form so we can count non‐NAs
+  pivot_longer(all_of(indicators),
+               names_to   = "indicator",
+               values_to  = "value") %>%
+  group_by(bibtex) %>%
+  summarise(n_indicators = sum(!is.na(value)), .groups = "drop") %>%
+  filter(n_indicators > 0)
+```
+
+```{r 3}
+ggplot(measurement_counts, aes(x = n_indicators)) +
+  geom_bar() +
+  labs(x = "Number of indicators reported", y = "Number of papers", title = "Distribution of indicators counts per paper")
+```
+
+We have `r dim(measurement_counts)[1]` unique papers.
+
+```{r 4}
+knitr::kable(measurement_counts, caption = "Number of metrics used in each papers") %>% kableExtra::kable_styling()
+```
+
+### Distribution of different metrics types in papers
+
+We investigate how many papers use a given type of indicator. Distribution of unique papers reporting at least one result for the selected indicator, i.e. how many unique papers (bibtex keys) reported each indicator.
+
+```{r 5}
+unique_data_clean <- data_clean %>%
+  # drop any rows with missing bibtex if those are “unnamed” data:
+  filter(!is.na(bibtex)) %>%
+  # one row per work
+  group_by(bibtex) %>%
+  # for each indicator, check if ANY non-NA appears
+  summarise(across(all_of(indicators), ~ any(!is.na(.)), .names = "used_{.col}")) %>%
+  ungroup() %>%
+  # now count how many works used each one
+  summarise(across(starts_with("used_"), ~ sum(.), .names = "{.col}")) 
+```
+
+```{r 6}
+knitr::kable(unique_data_clean, caption = "Distribution of unique works reporting at least one result for the selected indicator") %>% kableExtra::kable_styling()
+```
+
+Distribution of works reporting one or more results (values) for the selected indicator:
+
+-   measurement_counts is a table of (bibtex, n_measures) telling us for each bibtex how many different values are actually reported by the given indicators.
+
+```{r 7}
+# Fill down the bibtex so each measurement row knows its paper
+data_filled <- data_clean %>%
+  fill(.data[['bibtex']], .direction = "down")
+```
+
+```{r 8}
+# Count measurements per paper × indicator
+measurement_counts <- data_filled %>%
+  # now every row has a bibtex, so no need to filter(!is.na)
+  group_by(bibtex) %>%
+  summarise(across(all_of(indicators), ~ sum(!is.na(.)), .names = "n_{.col}")) %>%
+  ungroup() %>%
+  filter(if_any(starts_with("n_"), ~ . > 0))
+```
+
+```{r 9}
+knitr::kable(measurement_counts, caption = "Distribution of extracted indicators values per papers") %>% kableExtra::kable_styling()
+```
+
+We have `r dim(measurement_counts)[1]` unique papers.
+
+Compute overall totals and summary statistics on “total measurements per paper” (i.e. summing across all indicators).
+
+```{r 10}
+#  Overall totals & stats across *all* indicators per paper
+total_stats <- measurement_counts %>%
+  mutate(total_per_paper = rowSums(across(starts_with("n_")))) %>%
+  summarise(
+    n_papers    = n(),
+    grand_total = sum(total_per_paper),
+    mean        = mean(total_per_paper),
+    sd          = sd(total_per_paper),
+    median      = median(total_per_paper),
+    min         = min(total_per_paper),
+    max         = max(total_per_paper)
+  )
+```
+
+```{r 11}
+knitr::kable(total_stats, caption = "Global distribution and statistics") %>% kableExtra::kable_styling()
+```
+
+Summarise those counts across papers to get the total number of measurements per indicator and statistics (mean, sd, median, etc.)
+
+```{r 12}
+# Per-indicator summary across papers
+indicator_stats <- measurement_counts %>%
+  pivot_longer(cols      = starts_with("n_"),
+               names_to  = "indicator",
+               values_to = "n_measures") %>%
+  group_by(indicator) %>%
+  summarise(
+    papers_reported   = sum(n_measures >  0),
+    total_measures  = sum(n_measures),
+    mean_per_paper    = mean(n_measures),
+    sd_per_paper      = sd(n_measures),
+    median_per_paper  = median(n_measures),
+    min_per_paper     = min(n_measures),
+    max_per_paper    = max(n_measures),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_measures))
+```
+
+```{r 13}
+knitr::kable(indicator_stats, caption = "Distribution of indicators in all works") %>% kableExtra::kable_styling()
+```
+
+## Pseudoreplication: Naive approaches to comparision multiview and single view results
+
+The analysis below is only an introduction to the more in-depth analysis presented later in the article, performed using aggregated means and medians per work and meta-analysis.
+
+### Distribution of metrics values in papers
+
+```{r 14}
+long_df <- melt(data_clean[indicators], 
+                variable.name = "variable", 
+                value.name    = "value")
+
+gplot <- ggplot(long_df, aes(x = value)) +
+  geom_histogram(bins = 20,
+                 fill = "skyblue",
+                 color = "black") +
+  facet_wrap(~ variable,
+             scales = "free",
+             nrow   = 4,
+             ncol   = 2) +
+  labs(title = "Distribution of Different Metrics: Single-view and Multi-view", 
+       x     = "Score", 
+       y     = "Count") +
+  theme_minimal() +
+  theme(
+    plot.title        = element_text(hjust = 0.5, size = 16, face = "bold"),
+    strip.text        = element_text(size = 12),
+    axis.title        = element_text(size = 12),
+    panel.spacing     = unit(0.5, "lines")
+  )
+
+gplot
+```
+
+```{r 15}
+# Bind data into a single data‐frame
+plot_df <- rbind(
+  data.frame(
+    metric = "Accuracy",
+    approach = "Single View",
+    value = data_clean$`acc.view.single.text`
+  ),
+  data.frame(
+    metric = "Accuracy",
+    approach = "Multi View",
+    value = data_clean$`acc.view.combinations.text`
+  ),
+  data.frame(
+    metric = "Precision",
+    approach = "Single View",
+    value = data_clean$`prec.view.single.text`
+  ),
+  data.frame(
+    metric = "Precision",
+    approach = "Multi View",
+    value = data_clean$`prec.view.combinations.text`
+  ),
+  data.frame(
+    metric = "Recall",
+    approach = "Single View",
+    value = data_clean$`rec.view.single.text`
+  ),
+  data.frame(
+    metric = "Recall",
+    approach = "Multi View",
+    value = data_clean$`rec.view.combinations.text`
+  ),
+  data.frame(
+    metric = "F1-Score",
+    approach = "Single View",
+    value = data_clean$`f1score.view.single.text`
+  ),
+  data.frame(
+    metric = "F1-Score",
+    approach = "Multi View",
+    value = data_clean$`f1score.view.combinations.text`
+  )
+)
+
+# Compute mean & median for each metric and approach
+stats_df <- plot_df %>%
+  group_by(metric, approach) %>%
+  summarise(
+    mean_val   = mean(value, na.rm = TRUE),
+    median_val = median(value, na.rm = TRUE),
+    label      = sprintf("%0.1f, (%0.1f)", median_val, mean_val),
+    .groups    = "drop"
+  )
+
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(
+    ggsci::pal_jco("default")(2))(2), unique(plot_df$approach))
+
+# Build the boxplot and add the text labels at y = Inf (top of panel)
+gplot <- ggplot(plot_df, aes(x = approach, y = value, fill = approach)) +
+  geom_boxplot() +
+  geom_text(
+    data    = stats_df,
+    aes(label = label),
+    y       = Inf,
+    vjust   = 1.3,
+    size    = 3
+  ) +
+  facet_wrap(~ metric, scales = "free") +
+  scale_fill_manual(name   = "Approach", values = global_palette) +
+  labs(title = "Comparison: Single-view vs. Multi-view", 
+       y     = "Score", 
+       x     = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title      = element_text(hjust = 0.5, face = "bold"))
+
+gplot
+```
+
+```{r 16}
+# Summarize each column
+stats_list <- summary_stats(data_clean[indicators])
+
+summary_df <- do.call(rbind, stats_list)
+summary_df$Metric <- rownames(summary_df)
+rownames(summary_df) <- NULL
+```
+
+```{r 17}
+knitr::kable(summary_df[, c("Metric", "Count", "Median", "Min", "Max", "Mean", "SD")], caption = "Distribution of metrics in all works") %>% kableExtra::kable_styling()
+```
+
+### Statistical tests of the difference in the distributions of metrics values
+
+#### Checking the normality of distributions
+
+```{r 18}
+# Perform Shapiro-Wilk test and get p-values in one step
+shapiro_p_values <- sapply(data_clean[indicators], function(x)
+  shapiro.test(na.omit(x))$p.value)
+
+# Present results as a formatted table
+result_table <- data.frame(
+  Variable = names(shapiro_p_values),
+  P_Value = shapiro_p_values,
+  Normal_Distribution = ifelse(shapiro_p_values > 0.05, "Yes", "No")
+)
+```
+
+```{r 19}
+knitr::kable(result_table, caption = "Shapiro-Wilk test result") %>% kableExtra::kable_styling()
+```
+
+#### Differences in indicators values
+
+```{r 20, include=FALSE}
+view_diffs <- data.frame(
+  acc_view_text_diff = data_clean$`acc.view.combinations.text` - data_clean$`acc.view.single.text`,
+  prec_view_text_diff = data_clean$`prec.view.combinations.text` - data_clean$`prec.view.single.text`,
+  rec_view_text_diff = data_clean$`rec.view.combinations.text` - data_clean$`rec.view.single.text`,
+  f1score_view_text_diff = data_clean$`f1score.view.combinations.text` - data_clean$`f1score.view.single.text`
+)
+```
+
+Indicators values difference in form of histogram plots.
+
+```{r 21}
+long_diffs <- melt(view_diffs, variable.name = "metric_diff", value.name    = "diff")
+
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(8))(8),
+  unique(long_diffs$metric_diff)
+)
+
+gplot <- ggplot(long_diffs, aes(x = diff, fill = metric_diff)) +
+  geom_histogram(
+    bins     = 20,
+    color    = "black",
+    position = "identity",
+    alpha    = 0.8
+  ) +
+  facet_wrap(~ metric_diff,
+             scales = "free",
+             nrow   = 4,
+             ncol   = 2) +
+  scale_fill_manual(values = global_palette, guide  = FALSE) +
+  labs(title = "Distribution of Differences: Multi-view − Single-view", 
+       x     = "Difference (Multi − Single)", 
+       y     = "Frequency") +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(hjust = 0.5, face = "bold"),
+    strip.text    = element_text(size = 10),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+gplot
+```
+
+Indicators values difference in form of box-plots.
+
+```{r 22}
+df_long <- view_diffs %>%
+  pivot_longer(cols = everything(),
+               names_to = "Metric",
+               values_to = "Value") %>%
+  drop_na(Value)  # Remove rows with NA values
+
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(
+    ggsci::pal_jco("default")(8))(8), unique(df_long$Metric))
+
+# Create a box plot for each metric
+ggplot(df_long, aes(x = Metric, y = Value, fill = Metric)) +
+  geom_boxplot(outlier.color = "red", outlier.size = 2) +
+  stat_summary(
+    fun     = mean,
+    geom    = "point",
+    shape   = 18,
+    size    = 3,
+    color   = "darkred"
+  ) +
+  scale_fill_manual(values = global_palette) +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1),
+    plot.title   = element_text(hjust = 0.5, size = 14),
+    legend.position = "none"      # hide legend if you don't need it
+  ) +
+  labs(
+    title   = "Distribution of Difference Metric Values",
+    x       = "Metric",
+    y       = "Value",
+    caption = "Red diamonds indicate mean values"
+  )
+```
+
+```{r 23}
+# Build all plots and arrange as 4 rows × 2 columns
+plot_list <- lapply(colnames(view_diffs), function(col)
+  create_boxplot(view_diffs, col, global_palette))
+
+grid.arrange(grobs = plot_list, ncol  = 1, nrow  = 4)
+```
+
+```{r 24}
+stats_list <- summary_stats(view_diffs)
+
+summary_df <- do.call(rbind, stats_list)
+summary_df$Metric <- rownames(summary_df)
+rownames(summary_df) <- NULL
+```
+
+```{r 25}
+knitr::kable(summary_df[, c("Metric", "Count", "Min", "Max", "Mean", "Median", "SD")], caption = "Distribution of metrics in all works") %>% kableExtra::kable_styling()
+```
+
+#### Performs the Shapiro-Wilk test of normality of difference metrics' values
+
+```{r testshapiro}
+# Perform Shapiro-Wilk test and get p-values in one step
+shapiro_p_values <- sapply(view_diffs, function(x)
+  shapiro.test(na.omit(x))$p.value)
+
+# Present results as a formatted table
+result_table <- data.frame(
+  Variable = names(shapiro_p_values),
+  P_Value = shapiro_p_values,
+  Normal_Distribution = ifelse(shapiro_p_values > 0.05, "Yes", "No")
+)
+```
+
+```{r 26}
+knitr::kable(result_table, caption = "Shapiro-Wilk test of normality of difference metrics' values ") %>% kableExtra::kable_styling()
+```
+
+Key Elements:
+
+-   W statistic: Ranges from 0 to 1, with values closer to 1 indicating greater normality
+-   p-value: The critical value for determining significance (commonly using α = 0.05)
+
+Interpretation of results:
+
+-   acc_view_text_diff W = 0.8315 p-value = 2.5e-06 (0.0000025)
+    -   Interpretation: Since p \< 0.05, we reject the null hypothesis that the data is normally distributed. The accuracy text view differences are not normally distributed.
+-   prec_view_text_diff W = 0.91435 p-value = 0.089
+    -   Interpretation: Since p \> 0.05, we fail to reject the null hypothesis. This suggests the precision text view differences are approximately normally distributed.
+-   rec_view_text_diff W = 0.72602 p-value = 0.002854
+    -   Interpretation: Since p \< 0.05, we reject the null hypothesis that the data is normally distributed. The recall text view differences are not normally distributed.
+-   f1score_view_text_diff W = 0.83368 p-value = 5.966e-09
+    -   Interpretation: Since p \< 0.05 (very small), we strongly reject the null hypothesis. The F1 score text view differences are not normally distributed.
+
+Summary:
+
+-   Only the precision metric differences (prec_view_text_diff) show evidence of following a normal distribution.
+
+-   For the remaining metrics (accuracy, recall, F1 score), we should: Use non-parametric statistical tests instead of parametric ones For example, use the Wilcoxon signed-rank test instead of a paired t-test or consider data transformations to achieve normality (though interpretation becomes more complex)
+
+Visualization - Create Q-Q plots to visually examine the normality of your data Use box plots and histograms to better understand the distributions
+
+```{r 27}
+# which columns to plot
+metrics <- c(
+  "acc_view_text_diff",
+  "rec_view_text_diff",
+  "prec_view_text_diff",
+  "f1score_view_text_diff"
+)
+
+# set up 4 rows × 2 columns
+old_par <- par(
+  mfrow = c(4, 2),
+  # 4×2 layout
+  mar   = c(4, 4, 2, 1)
+) # margins: bottom, left, top, right
+
+for (m in metrics) {
+  x <- view_diffs[[m]]
+  # histogram
+  hist(
+    x,
+    breaks = 20,
+    main   = paste("Histogram of", gsub("_", " ", m)),
+    xlab   = "Difference",
+    col    = "skyblue",
+    border = "white"
+  )
+  # QQ‐plot
+  qqPlot(x, main = paste("QQ-Plot of", gsub("_", " ", m)))
+}
+
+# restore original graphics settings
+par(old_par)
+```
+
+#### Wilcoxon signed-rank test
+
+```{r 28}
+# Define metrics
+metrics <- c("acc", "prec", "rec", "f1score")
+
+# Get all test results
+all_stats <- t(sapply(metrics, get_wilcox_stats, data = data_clean))
+
+# Convert to data frame and add interpretations
+results <- data.frame(
+  metric = metrics,
+  all_stats,
+  significant = ifelse(all_stats[, "p"] < 0.05, "Yes", "No"),
+  stars = ifelse(
+    all_stats[, "p"] < 0.001,
+    "***",
+    ifelse(all_stats[, "p"] < 0.01, "**", ifelse(all_stats[, "p"] < 0.05, "*", "ns"))
+  ),
+  effect = ifelse(
+    all_stats[, "r"] < 0.1,
+    "Negligible",
+    ifelse(
+      all_stats[, "r"] < 0.3,
+      "Small",
+      ifelse(all_stats[, "r"] < 0.5, "Medium", "Large")
+    )
+  )
+)
+```
+
+```{r 29}
+knitr::kable(results, caption = "Wilcoxon signed-rank test") %>% kableExtra::kable_styling()
+```
+
+Interpretation of Wilcoxon Signed-Rank Test Results: Wilcoxon signed-rank test results show strong evidence that multi-view (combinations) approaches outperform single-view approaches across all metrics.
+
+-   Accuracy (acc-view-combinations-text vs. acc-view-single-text) - Test statistic V = 4396.5 p-value = 2.896494e-12
+    -   Interpretation: There is extremely strong evidence (p \< 0.001) that the text combinations view has different accuracy than the single text view. The large V value suggests combinations consistently outperform single views for accuracy.
+-   Precision (prec-view-combinations-text vs. prec-view-single-text) - Test statistic V = 206 p-value = 8.316040e-03
+    -   Interpretation: There is statistically strong evidence (p \< 0.01) that text combinations view has different precision than single text view.
+-   Recall (rec-view-combinations-text vs. rec-view-single-text) Test statistic V = 78 p-value = 4.882813e-04
+    -   Interpretation: There is extremely strong evidence (p \< 0.001) that text combinations view has different recall than single text view. The small V value may suggest a different pattern from accuracy (potentially more negative differences).
+-   F1-Score (f1score-view-combinations-text vs. f1score-view-single-text) Test statistic V = 4837.0 p-value = 1.895210e-15.
+    -   Interpretation: There is extremely strong evidence (p \< 0.001) that text combinations view has different F1 scores than single text view. This is the most significant result with the smallest p-value.
+
+Summary of Findings
+
+-   All metrics show significant differences between combinations and single views.
+
+-   Strength of evidence (from strongest to weakest): F1-Score (p = 1.895210e-15), Accuracy (p = 2.896494e-12), Recall (p = 4.882813e-04), Precision (p = 8.316040e-03)
+
+Direction of effect
+
+-   For accuracy and F1 score, the larger V values suggest multi-view approaches likely outperform single-view approaches.
+-   For recall, the smaller V value may indicate a different pattern.
+
+#### Calculate Cliff's Delta
+
+```{r 30}
+# Define the metrics
+metrics <- c("acc", "prec", "rec", "f1score")
+
+# Initialize data frame to store results
+cliff_summary <- data.frame(
+  Metric = character(),
+  Delta = numeric(),
+  CI_Lower = numeric(),
+  CI_Upper = numeric(),
+  Magnitude = character(),
+  N = integer(),
+  stringsAsFactors = FALSE
+)
+
+# Calculate Cliff's Delta for each metric
+for (metric in metrics) {
+  combo_col <- paste0(metric, ".view.combinations.text")
+  single_col <- paste0(metric, ".view.single.text")
+  
+  # Skip if columns don't exist
+  if (!all(c(combo_col, single_col) %in% names(data_clean))) {
+    next
+  }
+  
+  # Extract only complete pairs
+  valid_data <- na.omit(data_clean[c(combo_col, single_col)])
+  
+  # Calculate Cliff's Delta if we have enough data
+  if (nrow(valid_data) >= 3) {
+    result <- cliff.delta(valid_data[[combo_col]], valid_data[[single_col]], paired = TRUE)
+    
+    # Add to summary data frame
+    cliff_summary <- rbind(
+      cliff_summary,
+      data.frame(
+        Metric = metric,
+        Delta = result$estimate,
+        CI_Lower = result$conf.int[1],
+        CI_Upper = result$conf.int[2],
+        Magnitude = result$magnitude,
+        N = nrow(valid_data),
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+}
+```
+
+```{r 31}
+knitr::kable(cliff_summary, caption = "Cliff's Delta") %>% kableExtra::kable_styling()
+```
+
+```{r 32}
+# Print formatted results
+cat("\nCliff's Delta Effect Size Results:\n")
+cat("==================================\n")
+for (i in 1:nrow(cliff_summary)) {
+  row <- cliff_summary[i, ]
+  cat(
+    sprintf(
+      "\n%s: δ = %.4f (95%% CI: %.4f to %.4f), %s effect, n = %d\n",
+      toupper(row$Metric),
+      row$Delta,
+      row$CI_Lower,
+      row$CI_Upper,
+      row$Magnitude,
+      row$N
+    )
+  )
+}
+```
+
+#### Effect sizes discussion (Cliff's Delta vs r Effect Size)
+
+We calculated two different effect size measures for the same comparison, and they've given quite different results, for example for F-score we have:
+
+-   Cliff's Delta = 0.1207 (negligible effect)
+
+-   r Effect Size = 0.7948017 (large effect)
+
+This is a substantial discrepancy that requires explanation.
+
+1.  Why the Discrepancy Exists?
+
+Because, these two effect size measures calculate fundamentally different things:
+
+-   Cliff's Delta - Measures the degree of overlap between two distributions. Focuses on how often values from one group exceed values from another group. Ranges from -1 to 1, with 0 indicating complete overlap. Is less sensitive to outliers and extreme differences.
+
+-   r Effect Size (based on Z-statistic) - Measures the standardized strength of the relationship. Derived from the Z-statistic, which reflects the statistical significance. Ranges from 0 to 1, with higher values indicating stronger effects. Is more sensitive to the p-value of the test.
+
+Technical Explanation:
+
+-   The r effect size we calculated depends heavily on the p-value of Wilcoxon test. When p-values are very small (as in our case), the Z-value becomes very large, which in turn inflates the r effect size. The calculation r = Z/sqrt(n) means that r is directly proportional to how statistically significant our result is.
+
+-   Cliff's Delta, on the other hand, is calculated based on the actual data values and their relative positions, regardless of how statistically significant the difference is.
+
+2.  Which One Is More Accurate?
+
+Neither is "wrong" - they just measure different aspects of our data:
+
+-   Cliff's Delta is telling for us: "The distributions of scores for combinations and single views have substantial overlap, with combinations only slightly outperforming single views in terms of raw score comparisons."
+
+-   r Effect Size is telling for us: "The difference between combinations and single views is highly statistically significant and unlikely to be due to chance."
+
+3.  What's Going On in our Specific Data
+
+Based on these results, our data likely has these characteristics:
+
+-   The differences between combinations and single views are consistently in one direction (probably combinations \> single in most pairs) - There are enough pairs in our sample to make even these small differences statistically significant (hence the large r effect size)
+
+-   The magnitude of these differences is relatively small (hence the small Cliff's Delta) - The data might have some tied ranks or near-ties, which affects Cliff's Delta calculation
+
+Finally
+
+**Our analysis shows a highly statistically significant difference between combination views and single views (Wilcoxon signed-rank test, p \< 0.001, r = 0.79, large effect). However, the actual magnitude of improvement, as measured by Cliff's Delta (δ = 0.13), suggests the practical difference is relatively modest.**
+
+#### Simple statistics of pairs comparision
+
+Calculate the percentage of pairs where combinations of views outperform single views. Calculate the median difference to understand the typical magnitude. Create a histogram of the differences
+
+```{r 33}
+# Define the metrics to analyse
+metrics <- c("acc", "prec", "rec", "f1score")
+
+# Set up a 2x2 plotting layout
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+
+# Analyse each metric and store the differences
+diff_list <- list()
+for (metric in metrics) {
+  diff_list[[metric]] <- analyze_differences(metric, data_clean)
+}
+
+# Reset the plotting layout
+par(mfrow = c(1, 1))
+```
+
+```{r 34}
+# Create a summary table of all metrics
+summary_table <- data.frame(
+  Metric = metrics,
+  Percent_Positive = sapply(diff_list, function(d)
+    mean(d > 0, na.rm = TRUE) * 100),
+  Median_Diff = sapply(diff_list, function(d)
+    median(d, na.rm = TRUE)),
+  Mean_Diff = sapply(diff_list, function(d)
+    mean(d, na.rm = TRUE)),
+  Min_Diff = sapply(diff_list, function(d)
+    min(d, na.rm = TRUE)),
+  Max_Diff = sapply(diff_list, function(d)
+    max(d, na.rm = TRUE)),
+  StdDev = sapply(diff_list, function(d)
+    sd(d, na.rm = TRUE)),
+  N_Pairs = sapply(diff_list, function(d)
+    sum(!is.na(d)))
+)
+```
+
+```{r 35}
+knitr::kable(summary_table, caption = "Summary of Differences (Combination - Single)") %>% kableExtra::kable_styling()
+```
+
+## Average-then-Test: Overcoming the shortcoming of pseudoreplication
+
+Now, our quantitative analysis was conducted using a two-stage meta-analytic approach to ensure each study contributed a single, stable data point to the final analysis, thereby preventing pseudoreplication.
+
+Stage 1: Data Preparation and Within-Study Aggregation
+
+For each paper in our literature review, we extracted the reported performance scores for both the multi-view and single-view approaches. Paired differences were calculated for each available result within a single study. To create a single, representative performance metric for each study, we then calculated the mean of these paired differences. This procedure resulted in a final dataset where each study is represented by a single mean difference value for each relevant metric (Accuracy, F1-Score, etc.). This set of study-level mean differences forms the basis for our inferential testing.
+
+Stage 2: Inferential Testing Across Studies
+
+Research Question 1: Is there a significant difference in the mean reported outcomes across studies? To address this question, we employed a permutation test on the set of calculated study-level mean differences. This test directly evaluates whether the grand mean of these study-level outcomes is significantly different from zero, providing the primary answer to whether, on average, a multi-view approach yields a different result.
+
+Research Question 2: Is this finding robust to the influence of outlier studies?
+
+To complement the permutation test and assess the robustness of our findings, we applied a Wilcoxon signed-rank test to the exact same set of study-level mean differences. The purpose of this second test is to evaluate the central tendency (median) of the study-level outcomes. A significant result here would indicate that the effect is not merely driven by a few studies with extremely large means, but rather that a typical study in the literature also demonstrates an effect. This serves as a critical robustness check for the conclusion drawn from the permutation test.
+
+Research Question 3: If we pick a random value from group singleview and a random value from group mutliview, what is the probability that the value from mutliview is larger, minus the probability that the value from singleview is larger?
+
+To complement the Cliff's Delta has been performed.
+
+### Data Preparation and Within-Study Aggregation: Statistical tests of the difference in the distributions of metrics values
+
+Preparing data frame with outcomes (data points for each metric).
+
+```{r 36}
+view_diffs_per_article <- data.frame(
+  bibtex = data_clean$bibtex,
+  acc_view_text_diff = data_clean$`acc.view.combinations.text` - data_clean$`acc.view.single.text`,
+  prec_view_text_diff = data_clean$`prec.view.combinations.text` - data_clean$`prec.view.single.text`,
+  rec_view_text_diff = data_clean$`rec.view.combinations.text` - data_clean$`rec.view.single.text`,
+  f1score_view_text_diff = data_clean$`f1score.view.combinations.text` - data_clean$`f1score.view.single.text`
+)   %>% 
+  fill(bibtex, .direction = "down") %>%
+  filter(!(is.na(acc_view_text_diff) &
+           is.na(prec_view_text_diff) &
+           is.na(rec_view_text_diff) &
+           is.na(f1score_view_text_diff)))  %>%
+group_by(bibtex)
+```
+
+#### Differences in indicators values
+
+Aggregate metrics' values per work (research paper).
+
+```{r 37}
+metrics_columns <- c("acc_view_text_diff", "prec_view_text_diff", 
+                     "rec_view_text_diff", "f1score_view_text_diff")
+
+# Create summary for each bibtex and each metric
+bibtex_summary <- view_diffs_per_article %>%
+  group_by(.data[['bibtex']]) %>%
+  summarise(
+    across(all_of(metrics_columns), summary_stats_grouped, .names = "{.col}"),
+    .groups = "drop"
+  )
+
+# Reshape the data to have metrics as rows for better readability
+bibtex_summary_long <- bibtex_summary %>%
+  pivot_longer(
+    cols = -.data[['bibtex']],
+    names_to = c("metric", "stat"),
+    names_pattern = "(.+)\\.(.+)",
+    values_to = "value"
+  ) %>%
+  pivot_wider(
+    names_from = stat,
+    values_from = value
+  )
+
+bibtex_summary_tables <- view_diffs_per_article %>%
+  group_by(.data[['bibtex']]) %>%
+  group_map(~ {
+    paper_data <- .x[metrics_columns]
+    stats_list <- lapply(paper_data, summary_stats_grouped)
+    summary_df <- do.call(rbind, stats_list)
+    summary_df$Metric <- rownames(summary_df)
+    rownames(summary_df) <- NULL
+    summary_df$bibtex <- .y$bibtex
+    return(summary_df[, c("bibtex", "Metric", "Count", "Median", "Min", "Max", "Mean", "SD")])
+  })
+
+# Combine all tables
+final_summary <- do.call(rbind, bibtex_summary_tables)
+```
+
+```{r 38}
+knitr::kable(final_summary, 
+             caption = "Distribution of metrics per paper (bibtex)",
+             digits = 3) %>% 
+  kableExtra::kable_styling() %>%
+  kableExtra::collapse_rows(columns = 1, valign = "top")
+```
+
+Verification of data points count
+
+```{r 39}
+combined_summary <- do.call(rbind, bibtex_summary_tables)
+
+simple_metric_summary <- combined_summary %>%
+  group_by(.data[['Metric']]) %>%
+  summarise(
+    Total_Papers = n(),
+    Papers_with_Data = sum(Count > 0),
+    Total_Observations = sum(Count),
+    .groups = "drop"
+  )
+```
+
+```{r 40}
+knitr::kable(simple_metric_summary, 
+             caption = "Simple Metric Summary") %>% 
+  kableExtra::kable_styling()
+```
+
+Making histogram of metrics' mean values differences.
+
+```{r 41}
+# Prepare data for histograms - combine mean and median values
+histogram_data <- final_summary %>%
+  dplyr::select('bibtex', 'Metric', 'Mean', 'Median') %>%
+  filter(!is.na(Mean) | !is.na(Median)) %>%
+  pivot_longer(cols = c(.data[['Mean']], .data[['Median']]), 
+               names_to = "statistic", 
+               values_to = "value") %>%
+  filter(!is.na(value))
+
+# Create global palette for metrics
+metrics_list <- unique(histogram_data$Metric)
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(length(metrics_list)),
+  metrics_list
+)
+
+# Create plots for median (top row)
+median_plots <- lapply(metrics_list, function(metric) {
+  create_summary_boxplot(histogram_data, metric, "Median", global_palette)
+})
+
+# Create plots for mean (bottom row)
+mean_plots <- lapply(metrics_list, function(metric) {
+  create_summary_boxplot(histogram_data, metric, "Mean", global_palette)
+})
+
+# Combine all plots in a 2x4 grid (median on top, mean on bottom)
+all_plots <- c(median_plots, mean_plots)
+
+# Arrange as 2 rows × 4 columns
+grid.arrange(grobs = all_plots, ncol = 4, nrow = 2,
+             top = "Distribution of Summary Statistics by Metric\n(Top: Median, Bottom: Mean)")
+```
+
+Better visualization i.e. enhanced version with consistent y-axis scales.
+
+```{r 42}
+# Calculate y-axis limits for each statistic
+median_range <- histogram_data %>%
+  filter(statistic == "Median") %>%
+  pull(value) %>%
+  range(na.rm = TRUE)
+
+mean_range <- histogram_data %>%
+  filter(statistic == "Mean") %>%
+  pull(value) %>%
+  range(na.rm = TRUE)
+
+# Create scaled plots
+median_plots_scaled <- lapply(metrics_list, function(metric) {
+  create_summary_boxplot_scaled(histogram_data, metric, "Median", median_range, global_palette)
+})
+
+mean_plots_scaled <- lapply(metrics_list, function(metric) {
+  create_summary_boxplot_scaled(histogram_data, metric, "Mean", mean_range, global_palette)
+})
+
+# Arrange scaled version
+grid.arrange(grobs = c(median_plots_scaled, mean_plots_scaled), 
+             ncol = 4, nrow = 2,
+             top = "Distribution of Study-Level Performance Differences (Multiview − Singleview) \n(Top: Median, Bottom: Mean)")
+```
+
+Visualization to article
+
+```{r 43}
+clean_data <- preprocess_for_plotting(histogram_data)
+
+table(clean_data$Metric)
+table(histogram_data$Metric)
+
+metric_names <- c("Accuracy", "F1 Score", "Precision", "Recall")
+palette_colors <- pal_jco("default")(length(metric_names))
+my_palette <- setNames(palette_colors, metric_names)
+
+final_faceted_plot <- create_faceted_plot(clean_data, palette = my_palette)
+
+final_faceted_plot
+
+ggplot2::ggsave("fig-mv-difference.pdf", final_faceted_plot, width = 7.42, height = 8.46, units="in")
+```
+
+#### Performs the Shapiro-Wilk test of normality of difference metrics' values
+
+```{r 44}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(4),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data, 'acc_view_text_diff', global_palette)
+```
+
+Remove outlier i.e. data points from two works about multilingual document classification.
+
+```{r 45}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(4),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data %>% filter(!(bibtex %in% c('bhatt2019', 'aminim2009'))), 'acc_view_text_diff', global_palette)
+```
+
+```{r 46}
+knitr::kable(histogram_data %>% filter(statistic  == 'Mean') %>% group_by(.data[['Metric']])  %>%  filter(Metric == 'acc_view_text_diff'), caption = "Distribution of extracted indicators values per papers") %>% kableExtra::kable_styling()
+```
+
+```{r 47}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(4),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data, 'f1score_view_text_diff', global_palette)
+```
+
+```{r 48}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(4),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data %>% filter(!(bibtex %in% c('bhatt2019', 'aminim2009'))), 'f1score_view_text_diff', global_palette)
+```
+
+```{r 49}
+knitr::kable(histogram_data %>% filter(statistic  == 'Mean') %>% group_by(.data[['Metric']])  %>%  filter(Metric == 'f1score_view_text_diff'), caption = "Distribution of extracted indicators values per papers") %>% kableExtra::kable_styling()
+```
+
+```{r 50}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(4),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data, 'prec_view_text_diff', global_palette)
+```
+
+```{r 60}
+knitr::kable(histogram_data %>% filter(statistic  == 'Mean') %>% group_by(.data[['Metric']])  %>%  filter(Metric == 'prec_view_text_diff'), caption = "Distribution of extracted indicators values per papers") %>% kableExtra::kable_styling()
+```
+
+```{r 70}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(4),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data, 'rec_view_text_diff', global_palette)
+```
+
+```{r 80}
+knitr::kable(histogram_data %>% filter(statistic  == 'Mean') %>% group_by(.data[['Metric']])  %>%  filter(Metric == 'rec_view_text_diff'), caption = "Distribution of extracted indicators values per papers") %>% kableExtra::kable_styling()
+```
+
+Global statistics mean of means and median of medians.
+
+```{r 90}
+# Create summary statistics grouped by Metric and statistic
+histogram_summary <- histogram_data %>%
+  group_by(.data[['Metric']], .data[['statistic']]) %>%
+  summarise(
+    summary_stats_grouped(value),
+    .groups = "drop"
+  )
+
+knitr::kable(histogram_summary, 
+             caption = "Summary Statistics of Mean and Median Fifferences Values by Metric.",
+             digits = 3) %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  kableExtra::collapse_rows(columns = 1, valign = "top")
+```
+
+Prepare table to article
+
+```{r 100}
+clean_data <- preprocess_for_plotting(histogram_data)
+
+summary_table_data <- clean_data %>%
+  group_by(Metric, statistic) %>%
+  summarise(
+    N = n(),
+    Min = min(Difference, na.rm = TRUE),
+    Q1 = quantile(Difference, 0.25, na.rm = TRUE),
+    Median = median(Difference, na.rm = TRUE),
+    Mean = mean(Difference, na.rm = TRUE),
+    Q3 = quantile(Difference, 0.75, na.rm = TRUE),
+    Max = max(Difference, na.rm = TRUE),
+    SD = sd(Difference, na.rm = TRUE),
+    .groups = "drop" # Ungroup after summarising
+  ) %>%
+  # Arrange for better readability
+  arrange(Metric, statistic)
+```
+
+```{r 101}
+knitr::kable(summary_table_data, 
+             caption = "Descriptive Statistics for Study-Level Performance Differences.",
+             digits = 3) %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  kableExtra::collapse_rows(columns = 1, valign = "top")
+```
+
+```{r 102}
+latex_table_code <- summary_table_data %>%
+  # Use kable() with formatting for LaTeX
+  kable(
+    format = "latex",
+    booktabs = TRUE, # Creates professional horizontal lines (\toprule, \midrule, etc.)
+    digits = 2,      # Round all numbers to 2 decimal places
+    caption = "Descriptive Statistics for Study-Level Performance Differences.",
+    label = "tab:summary_stats", # For referencing in text with \ref{tab:summary_stats}
+    col.names = c("Metric", "Stat.", "N", "Min", "Q1", "Median", "Mean", "Q3", "Max", "SD")
+  ) %>%
+  # Use kable_styling for a better look
+  kable_styling(latex_options = c("striped", "scale_down")) %>%
+  # Group rows by Metric for excellent readability
+  group_rows(index = table(summary_table_data$Metric))
+
+# Print the code to the console
+print(latex_table_code)
+```
+
+Our choice of statistical tests was guided by a formal assessment of the assumptions underlying parametric testing, specifically data distribution and sample size. The analysis was conducted on the paired differences between the multi-view and single-view approaches for each performance metric.
+
+1.  Data Assessment and Assumption Checking
+
+An initial analysis was conducted using descriptive statistics, data visualization, and formal normality testing.
+
+Sample Sizes: The number of paired comparisons available for analysis was moderate for accuracy (n=20) and F1-score (n=17), but critically small for precision (n=5) and recall (n=6).
+
+Normality of Differences: The Shapiro-Wilk test for normality was applied to the distribution of the paired differences for each metric. The test rejected the null hypothesis of normality for accuracy (p \< 0.05) but failed to reject it for F1-score, precision, and recall (p \> 0.05). An outlier was also identified in the accuracy data.
+
+2.  Rationale for Non-Parametric Testing and Methodological Limitations
+
+The violation of the normality assumption for the accuracy metric precludes the use of a standard paired t-test. For the F1-score, precision, and recall metrics, while normality was not rejected, this finding must be interpreted with extreme caution. Normality tests have very low statistical power on small samples (n \< 30) and are particularly unreliable for the precision (n=5) and recall (n=6) samples.
+
+Given these conditions, the sample size itself, rather than the unprovable nature of the distribution, becomes the primary reason for avoiding parametric tests. No statistical test can compensate for the low power and high uncertainty inherent in such small samples.
+
+Therefore, we have adopted a non-parametric testing strategy. The results for precision and recall should be considered exploratory and interpreted with significant caution, as the small sample sizes prevent robust statistical inference.
+
+3.  Statistical Tests for Research Questions
+
+To provide a comprehensive comparison, we address the our research questions. By employing both a permutation test for the mean and a Wilcoxon signed-rank test for the central tendency, we provide a multi-faceted and robust comparison, while acknowledging the inherent limitations of our dataset.
+
+### Inferential Testing Across Studies: Statistical tests of the difference in the distributions of metrics values
+
+#### Permutation test
+
+```{r 103}
+# Define metrics from histogram_data
+metrics <- unique(histogram_data$Metric)
+
+# Run the permutation test for each metric
+all_perm_stats <- t(sapply(metrics, get_permutation_stats, data = histogram_data))
+
+# Convert to a data frame for nice formatting
+results_perm <- data.frame(
+  metric = metrics,
+  all_perm_stats,
+  significant = ifelse(!is.na(all_perm_stats[, "p_value"]) & all_perm_stats[, "p_value"] < 0.05, "Yes", "No"),
+  stars = ifelse(
+    is.na(all_perm_stats[, "p_value"]), "NA",
+    ifelse(all_perm_stats[, "p_value"] < 0.001, "***",
+    ifelse(all_perm_stats[, "p_value"] < 0.01, "**",
+    ifelse(all_perm_stats[, "p_value"] < 0.05, "*", "ns")))
+  ),
+  effect = ifelse(
+    is.na(all_perm_stats[, "cohens_d"]), "NA",
+    # Interpretation for Cohen's d
+    # Note: we use abs() for magnitude regardless of direction
+    ifelse(abs(all_perm_stats[, "cohens_d"]) < 0.2, "Negligible",
+    ifelse(abs(all_perm_stats[, "cohens_d"]) < 0.5, "Small",
+    ifelse(abs(all_perm_stats[, "cohens_d"]) < 0.8, "Medium", "Large")))
+  )
+)
+
+rownames(results_perm) <- NULL
+```
+
+```{r 104}
+knitr::kable(results_perm, 
+             caption = "Permutation test - Testing if mean differences differ from zero.",
+             col.names = c("Metric", "Observed Mean", "p-value", "Cohen's d", "n", "Significant (p<0.05)", " ", "Effect Size"),
+             digits = 3) %>%
+  kableExtra::kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+To evaluate the impact of the multi-view approach on mean performance, a one-sample permutation test (9,999 permutations) was conducted on the paired differences for each metric. The results, demonstrate a clear and consistent advantage for the multi-view methodology.
+
+The analysis revealed a statistically significant improvement for the multi-view approach in terms of accuracy. The mean difference was 4.34 points in favor of the multi-view method, a result that was highly unlikely to be due to chance (p = 0.0001). This was supported by a medium, practically meaningful effect size (Cohen's d = 0.73). An even larger, significant improvement was observed for F1-score, which increased by an average of 3.28 points (p = 0.0019) with a large effect size (Cohen's d = 0.89).
+
+Notably, despite the small sample size (n=6), a statistically significant improvement was also found for recall (mean increase = 5.55, p = 0.0316). The large effect size (Cohen's d = 1.00) and statistical significance suggest that the positive impact on recall was very consistent across the available data points.
+
+In contrast, the test for precision did not yield a statistically significant result (p = 0.13). Although the observed effect in the sample was large (Cohen's d = 1.09), the extremely small sample size (n=5) leads to low statistical power and high uncertainty. Therefore, we cannot draw a reliable conclusion about the effect of the multi-view approach on precision, and this finding should be considered inconclusive.
+
+In summary, the permutation test provides robust evidence that the multi-view approach significantly enhances mean accuracy, F1-score, and recall. The evidence regarding its impact on precision is inconclusive, likely due to data limitations.
+
+#### Wilcoxon signed-rank test and effect size r (rank-biserial correlation)
+
+Rank-Biserial Correlation (r) is the effect size for the Wilcoxon test. For a paired test (Wilcoxon Signed-Rank), it's calculated from the sum of signed ranks. In simple words, It answers the question:
+
+-   How strong and consistent is the direction of the difference, weighting by the size of the rank? It also ranges from -1 to 1.
+
+```{r 105}
+metrics <- unique(histogram_data$Metric)
+
+# Get all test results using the function
+all_stats_corrected <- t(sapply(metrics, get_wilcox_stats_corrected, data = histogram_data))
+
+# Convert to data frame and add interpretations
+results_corrected <- data.frame(
+  metric = metrics,
+  all_stats_corrected,
+  significant = ifelse(!is.na(all_stats_corrected[, "p"]) & all_stats_corrected[, "p"] < 0.05, "Yes", "No"),
+  stars = ifelse(is.na(all_stats_corrected[, "p"]), "NA",
+                 ifelse(all_stats_corrected[, "p"] < 0.001, "***",
+                 ifelse(all_stats_corrected[, "p"] < 0.01, "**",
+                 ifelse(all_stats_corrected[, "p"] < 0.05, "*", "ns")))),
+  effect = ifelse(is.na(all_stats_corrected[, "r"]), "NA",
+                  ifelse(abs(all_stats_corrected[, "r"]) < 0.1, "Negligible",
+                  ifelse(abs(all_stats_corrected[, "r"]) < 0.3, "Small",
+                  ifelse(abs(all_stats_corrected[, "r"]) < 0.5, "Medium", "Large"))))
+)
+
+
+rownames(results_corrected) <- NULL
+```
+
+```{r 106}
+# Create formatted table
+knitr::kable(results_corrected, 
+             caption = "Wilcoxon signed-rank test - Testing if mean differences differ from zero",
+             digits = 4) %>% 
+  kableExtra::kable_styling()
+```
+
+To address our second research question and to assess the robustness of our findings to potential outliers, we conducted a Wilcoxon signed-rank test. This test evaluates the central tendency (median) of the paired differences. The results strongly corroborate the findings from the permutation test.
+
+The analysis revealed a highly significant positive difference in the central tendency for accuracy (V = 209, p \< .001) and F1-score (V = 139, p = .002). This confirms that the advantage of the multi-view approach for these metrics is not merely an artifact of the mean being skewed by extreme values but represents a consistent, positive shift in typical performance.
+
+A statistically significant positive difference was also found for recall (V = 21, p = .031). As with the permutation test, this result, while significant, is based on a small sample (n=6) and should be interpreted as indicative but less robust than the findings for accuracy and F1-score.
+
+For precision, the Wilcoxon test found no statistically significant evidence of a difference (V = 14, p = 0.125), a result consistent with the underpowered permutation test. This reinforces the conclusion that the data is insufficient to make a reliable claim about the impact on precision.
+
+A Note on Effect Size (r): It is important to note that while the calculated rank-biserial correlation (r) suggests a "Large" effect for all metrics, this effect size measure can be misleading when sample sizes are critically small. For the precision metric, the non-significant p-value tells us we cannot confidently conclude the effect is different from zero, rendering the large r value an unreliable indicator of practical importance. Therefore, the primary conclusion is drawn from the p-value, which properly accounts for sample size and statistical uncertainty.
+
+#### Calculate Cliff's Delta
+
+Cliff's Delta (d) is an effect size of dominance. It answers the question:
+
+-   If I pick a random value from group A and a random value from group B, what is the probability that the value from A is larger, minus the probability that the value from B is larger? (It ranges from -1 to 1)
+
+```{r 107}
+# Define the metrics
+metrics <- c("acc", "prec", "rec", "f1score")
+
+# Initialize data frame to store results
+cliff_summary <- data.frame(
+  Metric = character(),
+  Delta = numeric(),
+  CI_Lower = numeric(),
+  CI_Upper = numeric(),
+  Magnitude = character(),
+  N = integer(),
+  Mean_Single = numeric(),
+  Mean_Combo = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Calculate Cliff's Delta for each metric
+for (metric in metrics) {
+  # Prepare data for this metric
+  cliff_data <- prepare_cliff_data(metric, data_clean, aggregation_method = "mean")
+  
+  # Skip if no valid data
+  if (is.null(cliff_data) || nrow(cliff_data) < 3) {
+    next
+  }
+  
+  # Calculate Cliff's Delta (combinations vs single)
+  result <- cliff.delta(cliff_data$combo_view, cliff_data$single_view, paired = TRUE)
+  
+  # Add to summary data frame
+  cliff_summary <- rbind(
+    cliff_summary,
+    data.frame(
+      Metric = metric,
+      Delta = result$estimate,
+      CI_Lower = result$conf.int[1],
+      CI_Upper = result$conf.int[2],
+      Magnitude = result$magnitude,
+      N = nrow(cliff_data),
+      Mean_Single = mean(cliff_data$single_view),
+      Mean_Combo = mean(cliff_data$combo_view),
+      Mean_Difference = mean(cliff_data$combo_view)-mean(cliff_data$single_view),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+rownames(cliff_summary) <- NULL
+```
+
+```{r 108}
+knitr::kable(cliff_summary, 
+             caption = "Cliff's Delta - Effect Size for Combinations vs Single View (Levels: negligible < small < medium < large)",
+             digits = 4) %>% 
+  kableExtra::kable_styling()
+```
+
+```{r 109}
+# Print formatted results
+cat("\nCliff's Delta Effect Size Results (Combinations vs Single View):\n")
+cat("================================================================\n")
+for (i in 1:nrow(cliff_summary)) {
+  row <- cliff_summary[i, ]
+  cat(
+    sprintf(
+      "\n%s: δ = %.4f (95%% CI: %.4f to %.4f), %s effect, n = %d\n",
+      toupper(row$Metric),
+      row$Delta,
+      row$CI_Lower,
+      row$CI_Upper,
+      row$Magnitude,
+      row$N
+    )
+  )
+  cat(sprintf("  Mean Single View: %.2f, Mean Combinations: %.2f\n", 
+              row$Mean_Single, row$Mean_Combo))
+}
+```
+
+It's important to understand what Cliff's Delta tells us. It is a non-parametric effect size that measures stochastic dominance.
+
+A Delta of 0.22 (for Accuracy) means that if we randomly select a study, there is a 22% higher probability that the multi-view approach had a better result than the single-view approach than the reverse.
+
+A Delta of 0 means it's a 50/50 chance which one is better.
+
+The Confidence Interval (CI) is the most important part for inference. A 95% CI that does not cross zero suggests we are 95% confident that a real effect exists. A CI that does cross zero means we cannot rule out the possibility of zero (or even a negative) effect.
+
+1.  Accuracy (acc)
+
+-   Delta (0.220): This is a small positive effect. It suggests a consistent, albeit modest, advantage for the multi-view approach.
+
+-   CI [-0.15, 0.54]: This is the key finding. The confidence interval is wide and crosses zero.
+
+-   Interpretation: This does not contradict our significant p-value from the other tests. It adds nuance. The p-value told us "the effect is probably not zero." This CI tells us "...but given the sample size (n=20) and variability, the true effect could plausibly range from a small negative effect (-15%) to a large positive one (+54%)." It highlights our uncertainty about the effect's magnitude.
+
+2.  F1-Score (f1score)
+
+-   Delta (0.163): A small positive effect, similar to accuracy.
+
+-   CI [-0.24, 0.52]: Again, this CI is wide and crosses zero.
+
+-   Interpretation: The conclusion is the same as for accuracy. There is evidence of a small, positive effect, but we cannot be highly confident in its precise size.
+
+3.  Recall (rec)
+
+-   Delta (0.222): A small positive effect, consistent with the other metrics.
+
+-   CI [-0.47, 0.74]: This interval is extremely wide, spanning from a substantial negative effect to a very large positive one.
+
+-   Interpretation: This is a classic signature of an underpowered analysis (n=6). The CI correctly reflects that while the point estimate is positive, the data is far too limited to make any confident claim about the size or even the direction of the true effect.
+
+4.  Precision (prec)
+
+-   Delta (0.120): A negligible effect.
+
+-   CI [-0.61, 0.74]: An even wider confidence interval due to the critically small sample (n=5).
+
+-   Interpretation: The results for precision are entirely inconclusive. The CI tells the true story: we know very little about the effect of the multi-view approach on precision from this data.
+
+### Discussion
+
+To quantify the practical magnitude of the difference between the two approaches, we calculated Cliff's Delta, a non-parametric effect size. This metric evaluates the probability that a randomly selected outcome from a multi-view study is superior to that of a single-view study.
+
+The analysis showed a small, positive effect size for accuracy (Delta = 0.22), F1-score (Delta = 0.16), and recall (Delta = 0.22). The effect for precision was negligible (Delta = 0.12). These point estimates suggest a consistent, modest advantage for the multi-view approach across most metrics.
+
+Crucially, however, the 95% confidence intervals for the Delta statistic were wide for all metrics and all of them included zero. For example, the CI for accuracy was [-0.15, 0.54]. This does not contradict our earlier findings of statistical significance; rather, it provides important context. While the permutation and Wilcoxon tests indicate that an effect is likely present (p \< 0.05), the Cliff's Delta confidence intervals reveal that there is considerable uncertainty about the true magnitude of this effect. The wide CIs for recall and precision, in particular, highlight that the analysis for these metrics is severely underpowered.
+
+Taken together, our three analyses tell a comprehensive and nuanced story. The permutation and Wilcoxon tests provide strong evidence that a statistically detectable positive effect exists for Accuracy, F1-Score, and Recall. The Cliff's Delta analysis complements this by clarifying that the practical magnitude of this effect is likely small, and our ability to precisely estimate its size is limited by the sample sizes. Therefore, we conclude that the literature provides evidence for a consistent but modest advantage when using a multi-view approach.
+
+## Meta-analysis: A deeper insight analysis
+
+Our meta-analysis has a small number of studies (from k=5 to k=20). Standard meta-analysis methods can be overly optimistic in this situation, underestimating the true uncertainty. The `clubSandwich` package (`robust()`) corrects for this by providing more conservative and trustworthy p-values and confidence intervals. Using the `robust()` results demonstrates that we have used state-of-the-art, appropriate methods for our data, which makes our conclusions far more defensible.
+
+In our analysis, we:
+
+-   Prioritize the RVE results.
+
+-   Lead with the Weighted RVE model. This is our best and most defensible estimate of the true effect.
+
+-   Follow with the Unweighted RVE model. Use this to prove that our main finding is robust.
+
+-   Present the non-RVE results as a point of comparison. We present non-RVE results to show what we would have found using older, less appropriate methods. Their main purpose is to be transparent and, in this case, to demonstrate why the robust corrections were necessary.
+
+This report will perform the same meta-analysis for four key metrics: Accuracy, F1-Score, Precision, and Recall.
+
+```{r 110}
+metrics_to_analyze <- list(
+  list(comb = "acc.view.combinations.text", single = "acc.view.single.text", name = "Accuracy"),
+  list(comb = "f1score.view.combinations.text", single = "f1score.view.single.text", name = "F1-Score"),
+  list(comb = "prec.view.combinations.text", single = "prec.view.single.text", name = "Precision"),
+  list(comb = "rec.view.combinations.text", single = "rec.view.single.text", name = "Recall")
+)
+
+all_results <- list()
+
+for (metric in metrics_to_analyze) {
+  all_results[[metric$name]] <- perform_meta_analysis(
+    raw_data_frame = data_filled,
+    col_comb = metric$comb,
+    col_single = metric$single,
+    metric_name = metric$name
+  )
+}
+```
+
+### Publication bias analysis
+
+```{r 1101}
+metric_names <- names(all_results) # e.g., "Accuracy", "F1-Score", "Precision", "Recall"
+print(metric_names)
+```
+
+
+```{r 11011}
+name <- "Accuracy"
+check_publication_bias(all_results[[name]], name)
+```
+
+```{r 11012}
+name <- "F1-Score"
+check_publication_bias(all_results[[name]], name)
+```
+
+```{r 11013}
+name <- "Precision"
+check_publication_bias(all_results[[name]], name)
+```
+
+```{r 11014}
+name <- "Recall"
+check_publication_bias(all_results[[name]], name)
+```
+
+### Standard (Inverse-Variance Weighted) Random-Effects Model (Gold Standard)
+
+This model answers the question:
+
+-   What is the average effect if we give more weight to studies that provide more precise estimates (i.e., larger n, smaller sd)?
+
+This is the standard approach. To do this, we need to handle the studies with n=1. The best practice is data imputation: we will "fill in" a reasonable estimate for the missing standard deviations.
+
+#### Weighted Random-Effects Model: Accuracy
+
+```{r 111}
+print("--- Weighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$weighted_rve)
+```
+
+```{r 112}
+forest(all_results$Accuracy$weighted_rve,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r 113}
+print("--- Weighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$weighted)
+```
+
+```{r 114}
+forest(all_results$Accuracy$weighted,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+Our primary meta-analysis for the Accuracy metric was conducted using a robust, inverse-variance weighted random-effects model. This approach is considered the gold standard as it gives more weight to studies providing more precise estimates.
+
+The analysis revealed a very high degree of heterogeneity between studies (I² = 90.2%, p \< .0001), indicating that the magnitude of the multi-view advantage varies considerably across different research contexts.
+
+Despite this variability, the overall synthesis showed a statistically significant benefit for the multi-view approach. The average estimated improvement in accuracy was +4.67 percentage points (95% CI: [0.37, 8.98], p = 0.035). The confidence interval being entirely above zero provides strong evidence that, on average, multi-view methods outperform single-view methods for this metric. This finding serves as the primary conclusion of our quantitative synthesis.
+
+#### Weighted Random-Effects Model: F1-score
+
+```{r 115}
+print("--- Weighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$weighted_rve)
+```
+
+```{r 116}
+forest(all_results$`F1-Score`$weighted_rve,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r 117}
+print("--- Weighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$weighted)
+```
+
+```{r 118}
+forest(all_results$`F1-Score`$weighted,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+For the F1-score metric, our primary analysis utilized a robust inverse-variance weighted random-effects model. We note that the model was unable to detect between-study heterogeneity (I² = 0%), a finding likely influenced by the necessary data imputation for several low-precision studies.
+
+The primary finding of this analysis is a statistically significant positive effect of the multi-view approach. The estimated average improvement in F1-score was +3.08 percentage points (95% CI: [0.15, 6.02], p = 0.044). The use of robust variance estimation was critical here, as it appropriately adjusted the statistical test for the small effective number of studies driving the result, thereby yielding a conservative yet credible p-value. This finding corroborates our analysis for the Accuracy metric, showing a clear advantage for multi-view methodologies.
+
+#### Weighted Random-Effects Model: Precision
+
+```{r 119}
+print("--- Weighted Model (All studies equal): Precision ---")
+summary(all_results$Precision$weighted_rve)
+```
+
+```{r 120}
+forest(all_results$Precision$weighted_rve,
+       slab = all_results$Precision$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Precision",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r 121}
+print("--- Weighted Model (All studies equal): Precision ---")
+summary(all_results$Precision$weighted)
+```
+
+```{r 122}
+forest(all_results$Precision$weighted,
+       slab = all_results$Precision$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Precision",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+The primary meta-analysis for the Precision metric was severely constrained by a critical lack of data, incorporating only five studies.
+
+Our gold-standard analysis, a robust inverse-variance weighted model, yielded a non-significant result (estimate = +1.16, 95% CI: [-7.11, 9.43], p = 0.59). The extremely wide confidence interval indicates that the available data is compatible with both a substantial benefit and a substantial harm of the multi-view approach.
+
+This null finding is largely driven by the fact that the most precise study in the analysis reported a negative effect, directly conflicting with the positive trends seen in the other, less precise studies.
+
+In conclusion, due to the small number of studies and their conflicting results, no reliable conclusion can be drawn regarding the impact of multi-view methods on Precision. This represents a significant gap in the literature.
+
+#### Weighted Random-Effects Model: Recall
+
+```{r 123}
+print("--- Weighted Model (All studies equal): Recall ---")
+summary(all_results$Recall$weighted_rve)
+```
+
+```{r 124}
+forest(all_results$Recall$weighted_rve,
+       slab = all_results$Recall$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Recall",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r 125}
+print("--- Weighted Model (All studies equal): Recall ---")
+summary(all_results$Recall$weighted)
+```
+
+```{r 126}
+forest(all_results$Recall$weighted,
+       slab = all_results$Recall$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Recall",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+Our primary analysis for the Recall metric was based on a critically small sample of only six studies. Consequently, the findings, while statistically significant, should be interpreted with considerable caution.
+
+The gold-standard analysis, a robust inverse-variance weighted model (RVE), revealed a statistically significant and large positive effect for the multi-view approach. The average estimated improvement in Recall was +5.87 percentage points (95% CI: [1.55, 10.18], p = 0.020).
+
+It is crucial to note that a standard meta-analytic model without a robust variance correction would have failed to detect this effect (p=0.23), erroneously suggesting a lack of evidence. Our finding of significance is therefore contingent on the use of a more appropriate statistical method for small samples.
+
+In sum, while the available evidence is sparse, our best possible analysis suggests that multi-view methods provide a genuine benefit to Recall. This should be viewed as a strong preliminary finding that highlights an urgent need for more research to confirm the magnitude of this effect.
+
+### Unweighed Random-Effects Model
+
+This model answers the question: What is the average effect if we treat every study as equally important, regardless of its size or precision?
+
+#### Unweighed Random-Effects Model: Accuracy
+
+```{r 127}
+print("--- Unweighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$unweighted_rve)
+```
+
+```{r 128}
+forest(all_results$Accuracy$unweighted_rve,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r 129}
+print("--- Unweighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$unweighted)
+```
+
+```{r 130}
+forest(all_results$Accuracy$unweighted,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+Unweighed model (all studies have equal weight) + RVE Correction (the correct way to analyse this model) gives the following result: Estimate: +4.34 percentage points; 95% CI: [1.53, 7.15], p-value: 0.0052 (Significant)
+
+Even when we treat every study as having equal evidential value, the conclusion remains the same: there is a significant positive effect of a similar magnitude (+4.34 points). This demonstrates that our main finding is not an artifact of giving more weight to a few large or precise studies.
+
+Unweighed model (all studies have equal weight) without RVE Correction gives the following result: Estimate: +4.34; 95% CI: [-0.17, 8.85], p-value: 0.059 (not significant at the p\<0.05 level)
+
+Using the naive standard method, we would have concluded there is no significant effect in the unweighed model. However, using the more appropriate RVE correction, the effect is significant. This is a perfect real-world example of how choosing the correct statistical method can change the outcome of a hypothesis test.
+
+#### Unweighed Random-Effects Model: F1-score
+
+```{r 131}
+print("--- Unweighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$unweighted_rve)
+```
+
+```{r 132}
+forest(all_results$`F1-Score`$unweighted_rve,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r 133}
+print("--- Unweighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$unweighted)
+```
+
+```{r 134}
+forest(all_results$`F1-Score`$unweighted,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+For the F1-score metric, the analysis was constrained by the fact that 7 of the 17 studies reported only a single outcome, necessitating the imputation of within-study variance. A consequence of this was that the meta-analytic model was unable to detect significant between-study heterogeneity (I² = 0.00%). Given this limitation, we focused on the most robust estimate of the mean effect.
+
+The unweighed model with robust variance estimation (RVE) revealed a statistically significant advantage for the multi-view approach, with an average improvement in F1-score of 3.28 percentage points (95% CI: [1.40, 5.16], p = 0.0027). It is noteworthy that a standard meta-analytic model without RVE would have incorrectly failed to find a significant effect (p = 0.197), demonstrating the importance of our robust analytical approach.
+
+#### Unweighed Random-Effects Model: Precision
+
+```{r 135}
+print("--- Unweighted Model (All studies equal): Precision ---")
+summary(all_results$Precision$unweighted_rve)
+```
+
+```{r}
+forest(all_results$Precision$unweighted_rve,
+       slab = all_results$Precision$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Precision",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r}
+print("--- Unweighted Model (All studies equal): Precision ---")
+summary(all_results$Precision$unweighted)
+```
+
+```{r}
+forest(all_results$Precision$unweighted,
+       slab = all_results$Precision$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Precision",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+The most critical piece of information for the Precision metric is the number of studies: k = 5. With such a small sample, any analysis will have very low statistical power, meaning it will be very difficult to detect a true effect even if one exists. The primary conclusion here is not about the presence or absence of an effect, but about the insufficiency of the available evidence.
+
+Our meta-analysis of the Precision metric was severely limited, including only five studies (k=5). Consequently, the findings should be considered exploratory and interpreted with extreme caution.
+
+The model was unable to detect any between-study heterogeneity (I²=0%), which is likely an artifact of the very small sample size.
+
+Our most robust analysis, the unweighed model with robust variance estimation (RVE), showed a positive but non-significant trend toward improvement (estimate = +2.68, 95% CI: [-0.42, 5.78], p = 0.07). Because the confidence interval includes zero, we cannot rule out the possibility of no effect or even a small negative effect.
+
+Overall, due to the critically small number of studies, no firm conclusion can be drawn about the impact of the multi-view approach on the Precision metric. More research is clearly needed to provide a reliable estimate of this effect.
+
+#### Unweighed Random-Effects Model: Recall
+
+```{r}
+print("--- Unweighted Model (All studies equal): Recall ---")
+summary(all_results$Recall$unweighted_rve)
+```
+
+```{r}
+forest(all_results$Recall$unweighted_rve,
+       slab = all_results$Recall$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Recall",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r}
+print("--- Unweighted Model (All studies equal): Recall ---")
+summary(all_results$Recall$unweighted)
+```
+
+```{r}
+forest(all_results$Recall$unweighted,
+       slab = all_results$Recall$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Recall",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+The meta-analysis for the Recall metric was based on a critically small sample of only six studies, four of which reported only a single outcome. This severely limits the statistical power of the analysis and the reliability of its conclusions.
+
+Unsurprisingly, the model was unable to detect any significant between-study heterogeneity (I²=0%), a result likely driven by the data limitations.
+
+Our most robust analysis (unweighed RVE) yielded a large positive point estimate of +5.55 percentage points, but this trend was not statistically significant (95% CI: [-0.67, 11.77], p = 0.069). The wide confidence interval, which includes zero, signifies that the available evidence is insufficient to confirm a genuine effect.
+
+In summary, while there is a hint of a positive effect on Recall, the current body of literature is too sparse to draw any firm conclusions. This highlights a clear gap and a need for more research on this specific metric.
+
+### Metric values discussion
+
+| Metric | Model Type | RVE Correction | Estimate | 95% CI Lower | 95% CI Upper | p-value |
+|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
+| Accuracy | **Weighted** | **Yes** | **4.6748** | **0.37** | **8.98** | **0.0351** |
+|  | Weighted | No | 4.6748 | 0.7377 | 8.6120 | 0.02 |
+|  | Unweighed | Yes | 4.3405 | 1.5325 | 7.1485 | 0.0052 |
+|  | Unweighed | No | 4.3405 | -0.1663 | 8.8473 | 0.0591 |
+| F1-score | **Weighted** | **Yes** | **3.0831** | **0.1473** | **6.0190** | **0.0441** |
+|  | Weighted | No | 3.0831 | 0.3555 | 5.8108 | 0.0267 |
+|  | Unweighed | Yes | 3.2816 | 1.4023 | 5.1610 | 0.0027 |
+|  | Unweighed | No | 3.2816 | -1.7809 | 8.3441 | 0.2039 |
+| Precision | **Weighted** | **Yes** | **1.1600** | **-7.1086** | **9.4286** | **0.5910** |
+|  | Weighted | No | 1.1600 | -3.5261 | 5.8461 | 0.6276 |
+|  | Unweighed | Yes | 2.6780 | -0.4198 | 5.7758 | 0.0703 |
+|  | Unweighed | No | 2.6780 | -4.0695 | 9.4255 | 0.4366 |
+| Recall | **Weighted** | **Yes** | **5.8681** | **1.5534** | **10.1828** | **0.0201** |
+|  | Weighted | No | 5.8681 | -3.6917 | 15.4279 | 0.2289 |
+|  | Unweighed | Yes | 5.5468 | -0.6717 | 11.7653 | 0.0691 |
+|  | Unweighed | No | 5.5468 | -5.1377 | 16.2313 | 0.3089 |
+
+Our meta-analysis demonstrates a clear and statistically significant benefit of using multi-view approaches over single-view approaches, with an average improvement of +4.7 points in Accuracy and +3.1 points in F1-score. We also found preliminary but significant evidence for an improvement of +5.9 points in Recall, although this is based on limited data. The evidence for Precision was inconclusive.
+
+Critically, these findings highlight the importance of modern meta-analytic methods. The use of robust variance estimation proved to be the deciding factor in several analyses, turning ambiguous or non-significant results from standard models into clear, statistically significant conclusions. This underscores that as data grows more complex, so too must the statistical tools we use to analyse it.
+
+### Choosing promising works and discussion
+
+We performed an analysis that identifies the most promising papers and formulates data-driven hypotheses about *why* they performed so well.
+
+#### Strategy: Finding of Promising Papers
+
+The goal is to identify studies that show an unusually large performance gain (a large positive effect size, `yi`) from using a multiview approach. We will use two key criteria:
+
+-   **Magnitude of Effect:** Look for the highest `yi` values in both the Accuracy and F1 Score tables.
+
+-   **Robustness:** A paper that performs exceptionally well on *both* metrics is a stronger candidate than one that excels at only one.
+
+After identifying the top performers, we will cross-reference them with our taxonomy to uncover patterns in their methods.
+
+#### Analysis and Identification of Promising Papers
+
+Based on the meta-analysis results, two papers stand out as exceptionally promising due to their large and consistent performance gains.
+
+##### Promising Paper 1: Amin, et al. (2009) - The Robust High-Performer
+
+This paper is the strongest candidate because it demonstrates massive improvements across **both** key metrics.
+
+-   **Accuracy Gain (`yi`): +10.80 percentage points.** This is the second-largest improvement among all 20 studies.
+
+-   **F1 Score Gain (`yi`): +11.47 percentage points.** This is the single largest improvement among all 17 studies.
+
+Taxonomic Analysis of `aminim2009`
+
+-   **Fusion Strategy:** **Late Fusion** . This procedure is a classic example of **Late Fusion** (also known as decision-level fusion), where the outputs of separate models are combined, rather than the features themselves.
+
+-   **Fusion Technique:** **Probabilistic Fusion**. This implies the method models uncertainty, which can be very powerful.
+
+-   **Task:** **Multilingual Text Categorization**. This is a critical insight. The "views" are different languages, which provide naturally distinct and highly complementary signals.
+
+-   **Learning Paradigm:** Both Supervised and Semi-supervised, indicating flexibility.
+
+The aminim2009 paper's immense success comes from a powerful combination of:
+
+-   **Clever Data Augmentation:** Using MT to create artificial views to overcome data scarcity
+
+-   **Classic Late Fusion:** An ensemble method (majority voting) that leveraged the "wisdom of the crowd." The errors made by a classifier on an imperfect English-to-German translation are likely different from the errors made on an imperfect English-to-French translation, making the ensemble highly robust.
+
+##### Promising Paper 2: Bhatt, et al. (2019) - The High-Impact Specialist
+
+This paper is noteworthy for achieving the single largest performance gain in Accuracy, suggesting a highly effective specialized technique.
+
+-   **Accuracy Gain (`yi`): +26.99 percentage points.** This is a massive, outlier-level improvement that demands closer inspection.
+
+-   **F1 Score Gain:** Not included in the F1 score analysis, indicating a focus on Accuracy.
+
+**Taxonomic Analysis of `bhatt2019`:**
+
+-   **Fusion Strategy:** **Early Fusion**. This is a more straightforward approach of concatenating feature representations.
+
+-   **Fusion Technique:** ML-based and Probabilistic.
+
+-   **Task:** **Multilingual Text Categorization**. This reinforces the pattern observed with `aminim2009`.
+
+-   **Learning Paradigm:** Supervised and **Transfer Learning**. The use of transfer learning is a key modern element, suggesting that pre-trained models are being effectively leveraged.
+
+This bhatt2019 paper is a perfect example of a modern, deep-learning-native approach to multiview learning:
+
+-   **The Model Architecture and Fusion:** The paper proposes "CorrMCNN," a "correlation multi-modal deep convolution neural network" (Abstract). Figure 3 clearly shows a two-channel architecture where two views are encoded separately and then passed into a "Joint common representation" layer. This process of creating a shared latent space *from features* before a final decision is the definition of **Early Fusion** (or intermediate fusion).
+
+-   **The Role of Transfer Learning:** The taxonomy's identification of "Transfer Learning" is critical. The authors explicitly state they use pre-trained models.
+
+    -   **For Images (Section 4.3):** "we use a pre-trained model ResNet-50 to extract 2048-dimensional representative features."
+
+    -   **For Text (Section 8):** They confirm they use pre-trained 40-dimensional embeddings from `Klementiev et al. [7]` and modern 300-dimensional `Word2Vec` embeddings.
+
+-   **Key Innovation:** Their paper highlights a specific technical contribution: **"step-based reconstruction"** (Section 4.3). Instead of trying to reconstruct the entire high-dimensional original input (like an image), they only reconstruct intermediate feature maps. This drastically reduces the number of parameters, making their deep architecture trainable and efficient.
+
+#### Article comparison
+
+| Paper | Fusion Strategy | Fusion Technique | Key Innovation Driving Performance |
+|------------------|------------------|------------------|------------------|
+| Amini (2009) | Late Fusion | **Ensemble Method** (Majority Vote) | **Data Augmentation** via Machine Translation |
+| Bhatt (2019) | Early Fusion | **Neural Network Fusion** (Correlational Autoencoder) | **Efficient Deep Architecture** (Step-Reconstruction) + **Transfer Learning** |
+
+#### Hypothesis
+
+**Hypothesis 1: The Task Context is Paramount, Especially When Views are Naturally Orthogonal.**
+
+-   **Evidence:** Both top performers succeeded on **Multilingual Categorization**. This is not a coincidence. Different languages represent naturally distinct, high-quality feature spaces (views). The Amini paper further shows this is incredibly powerful in **low-resource scenarios**, where MT acts as a force multiplier for limited labelled data.
+
+**Hypothesis 2: Fusion Strategy is a Design Choice, Not a Panacea. The Learning Paradigm is More Important.**
+
+-   **Evidence:** The initial analysis was spot on. We have now confirmed that the #1 F1-Score gainer (`aminim2009`) used traditional **Late Fusion** (ensembling), while the #1 Accuracy gainer (`bhatt2019`) used modern **Early Fusion** (deep shared representation). This powerfully demonstrates that there is no single "best" fusion strategy. Success depends on aligning the strategy with the available tools:
+
+    -   If we have strong, independent classifiers, **Late Fusion** is excellent.
+
+    -   If we have powerful feature extractors (like pre-trained deep nets), **Early Fusion** is excellent.
+
+**Hypothesis 3: Leveraging Pre-trained Models (Transfer Learning) is a Key Driver of State-of-the-Art Performance in Modern Multiview Systems.**
+
+-   **Evidence:** This is the clearest trend. The `bhatt2019` paper's success is inseparable from its use of Word2Vec and ResNet. They did not learn their feature extractors from scratch. This implies that future breakthroughs in multiview learning will likely come not just from novel fusion architectures, but from more effective ways to fuse representations derived from ever-larger foundational models.
+
+## Summary
+
+We conducted a two-stage analysis to investigate whether multi-view approaches outperform single-view approaches.
+
+The first stage was an exploratory analysis designed to establish the presence and robustness of an effect by asking three preliminary questions:
+
+1.  Is there a statistically significant difference in the mean outcomes reported across the included studies?
+
+2.  Is this finding robust to the influence of potential outlier studies?
+
+3.  What is the probabilistic magnitude of the difference between the two groups, as measured by Cliff's Delta?
+
+The second stage was the primary, confirmatory analysis, which employed a robust, inverse-variance weighted meta-analysis. This more sophisticated approach synthesizes the evidence to answer a more precise, overarching research question:
+
+1.  What is the best estimate of the true average effect of the multi-view approach, after weighting each study by its statistical precision, and how consistent is this effect across the literature?
+
+### Exploratory Analysis: Establishing the Signal
+
+To first establish whether a detectable signal exists in the literature, we conducted a series of non-parametric tests on the study-level mean differences. A permutation test revealed a statistically significant positive effect for Accuracy (p \< .001), F1-Score (p = .002), and Recall (p = .032), but not for Precision (p = .129).
+
+To ensure these findings were not driven by outlier studies, a Wilcoxon signed-rank test confirmed these results, indicating the median effect was also significantly positive for the same three metrics. This suggests the advantage of a multi-view approach is a typical finding in the literature.
+
+Finally, to assess the practical magnitude of this effect, Cliff's Delta was calculated. This suggested a consistent but 'small' effect for Accuracy, F1-Score, and Recall. The wide confidence intervals, however, highlighted significant uncertainty in the magnitude and underscored the limited power of this initial analysis, particularly for Recall and Precision.
+
+### Primary Analysis: Quantifying the Effect and Uncovering Model Dependence
+
+Building on the exploratory findings, we conducted a full inverse-variance weighted random-effects meta-analysis to derive the most precise estimate of the average effect. This gold-standard approach confirmed the conclusions of our initial analysis.
+
+We found a statistically significant average improvement for Accuracy (+4.67 points, p = 0.035), F1-Score (+3.08 points, p = 0.044), and Recall (+5.87 points, p = 0.020). As in the exploratory phase, the effect on Precision remained non-significant.
+
+### Synthesis of Findings
+
+Taken together, our two-stage analytical approach provides a robust and coherent conclusion. The initial exploratory tests established the presence and consistency of a positive signal, while the primary meta-analysis provided the best quantitative estimate of its size. We conclude there is strong evidence for a consistent, statistically significant, but practically modest advantage for multi-view approaches across Accuracy, F1-Score, and Recall metrics.
+
+### Guidelines
+
+Guidelines for Building and Advancing Multiview Document Classifiers:
+
+For the Practitioner:
+
+1.  **Seek Orthogonality, But Be Practical.** Your first point is the golden rule. The biggest performance gains come from views that provide genuinely different information (e.g., text vs. metadata; different languages).
+
+    Action: Before building, perform a simple analysis. Train a separate classifier on each view. If their errors are largely uncorrelated (i.e., they fail on different types of documents), a multiview approach is highly likely to succeed.
+
+2.  **Match Your Fusion Strategy to Your Resources (Late vs. Early).** Our analysis shows there is no single "best" strategy, only the right tool for the job.
+
+-   **Choose Late Fusion (Ensembling/Voting) When:** You can easily train strong, independent classifiers for each view, or you need a simple, robust, and easily debugged system. The `aminim2009` paper is a testament to how powerful this "simple" approach can be.
+
+-   **Choose Early Fusion (Deep Shared Representation) When:** You have access to high-quality, pre-trained feature extractors (e.g., BERT, ResNet). This is the path to state-of-the-art performance but requires a more complex, end-to-end architecture.
+
+3.  **Embrace Transfer Learning as a Force Multiplier.** The `bhatt2019` paper proves that the most dramatic gains in modern systems come from not starting from scratch.
+
+    Action: For an Early Fusion architecture, your first step should be to leverage a large, pre-trained model to encode each view. The fusion architecture's job is to learn how to combine these already-powerful representations, not to learn the representations themselves.
+
+For the Designer & Architect:
+
+1.  **Think Like a Data Augmenter: If You Don't Have Views, Create Them.** This is the paradigm-shifting lesson from `aminim2009`. The most powerful view might be one you generate yourself.
+
+    Action: Brainstorm ways to create new, complementary data streams from a single source. For text, this could include:
+
+    -   Machine Translation: To get a different linguistic perspective.
+
+    -   Summarization: To get a "gist" view vs. a "details" view.
+
+    -   Keyword Extraction: To get a "topic" view vs. a "narrative" view.
+
+2.  **For Deep Fusion, Prioritize Efficiency with Intermediate Fusion.** The `bhatt2019` paper's "step-reconstruction" is a crucial insight. Reconstructing the high-dimensional original input is computationally expensive and often unnecessary.
+
+    Action: Design architectures that fuse and reconstruct intermediate feature layers. This provides the benefits of deep learning (rich representations) with a fraction of the computational cost, making complex models practical for real-world deployment.
+
+For the Theoretician & Researcher (Pushing the Boundaries):
+
+1.  **Focus on the *Why*: Quantify View Complementarity.** The field has confirmed *that* multiview works. The next frontier is to understand *why* and *how much*.
+
+    Action: Develop new metrics and theoretical frameworks to quantify the "orthogonality" or "complementarity" of different views *before* training. A theory that could predict the potential performance gain based on the properties of the views themselves would be a major breakthrough.
+
+2.  **Report Rigorously to Enable Synthesis.** Our entire meta-analysis was only possible because some studies reported the necessary statistics. Our survey highlighted that most do not.
+
+    Action: Advocate for a community standard. Papers should report not just the final multiview result, but also the performance of single-view baselines, standard deviations, and effect sizes. This practice is essential for building a cumulative, robust understanding of the field and avoiding the "replication crisis" that plagues other areas of AI.
+
+# Unimodal vs Multimodal
+
+Does adding other modalities to a text model improve its performance? Correct Pairs: text vs. text.image, text vs. text.audio, text vs. text.metadata. Interpretation: This isolates the value added by the new modality. The text model acts as a baseline. We want to know if going through the trouble of building a more complex multimodal system is worth it compared to a simpler, single-modality baseline. We do not answer for "Which single modality is most effective for this task?"
+
+```{r}
+indicators <- c(
+  "acc.mode.text",
+  "acc.mode.image",	
+  "acc.mode.metadata",	
+  "acc.mode.time.series",	
+  "acc.mode.audio",	
+  "acc.mode.text.image",	
+  "acc.mode.text.audio",	
+  "acc.mode.text.metadata",	
+  "acc.mode.text.time.series",	
+  "acc.mode.text.image.metadata",
+
+  "prec.mode.text",	
+  "prec.mode.image",	
+  "prec.mode.audio",	
+  "prec.mode.text.image",	
+  "prec.mode.text.audio",	
+  "prec.mode.text.metadata",
+
+  "rec.mode.text",	
+  "rec.mode.image",	
+  "rec.mode.audio",	
+  "rec.mode.text.image",	
+  "rec.mode.text.audio",	
+  "rec.mode.text.image.audio",	
+  "rec.mode.text.metadata",
+
+  "f1score.mode.text",	
+  "f1score.mode.image",	
+  "f1score.mode.audio",	
+  "f1score.mode.metadata",	
+  "f1score.mode.text.image",	
+  "f1score.mode.text.audio",	
+  "f1score.mode.text.metadata",	
+  "f1score.mode.text.image.metadata"
+)
+```
+
+## Distribution of metrics in papers
+
+### Distribution of all metrics types in papers
+
+```{r}
+# For each bibtex, how many measurements did it report in total?
+measurement_counts <- data_clean %>%
+  filter(!is.na(bibtex)) %>%
+  # gather into long form so we can count non‐NAs
+  pivot_longer(all_of(indicators),
+               names_to   = "indicator",
+               values_to  = "value") %>%
+  group_by(bibtex) %>%
+  summarise(n_indicators = sum(!is.na(value)), .groups = "drop") %>%
+  filter(n_indicators > 0)
+```
+
+```{r}
+ggplot(measurement_counts, aes(x = n_indicators)) +
+  geom_bar() +
+  labs(x = "Number of metrics reported", y = "Number of papers", title = "Distribution of metrics counts per paper")
+```
+
+We have `r dim(measurement_counts)[1]` unique papers.
+
+```{r}
+knitr::kable(measurement_counts, caption = "Number of indicators used in each papers") %>% kableExtra::kable_styling()
+```
+
+### Distribution of different metrics types in papers
+
+We investigate how many papers use a given type of indicator. Distribution of unique papers reporting at least one result for the selected indicator, i.e. how many unique papers (bibtex keys) reported each indicator.
+
+```{r}
+unique_data_clean <- data_clean %>%
+  # drop any rows with missing bibtex if those are “unnamed” data:
+  filter(!is.na(bibtex)) %>%
+  # one row per job
+  group_by(bibtex) %>%
+  # for each indicator, check if ANY non-NA appears
+  summarise(across(all_of(indicators), ~ any(!is.na(.)), .names = "used_{.col}")) %>%
+  ungroup() %>%
+  # now count how many jobs used each one
+  summarise(across(starts_with("used_"), ~ sum(.), .names = "{.col}")) 
+```
+
+```{r}
+knitr::kable(unique_data_clean, caption = "Distribution of unique works reporting at least one result for the selected indicator") %>% kableExtra::kable_styling()
+```
+
+Distribution of works reporting one or more results (values) for the selected indicator:
+
+-   measurement_counts is a table of (bibtex, n_measures) telling us for each bibtex how many different values are actually reported by the given indicators.
+
+```{r}
+# Fill down the bibtex so each measurement row knows its paper
+data_filled <- data_clean %>%
+  fill(bibtex, .direction = "down")
+```
+
+```{r}
+# Count measurements per paper × indicator
+measurement_counts <- data_filled %>%
+  # now every row has a bibtex, so no need to filter(!is.na)
+  group_by(bibtex) %>%
+  summarise(across(all_of(indicators), ~ sum(!is.na(.)), .names = "n_{.col}")) %>%
+  ungroup() %>%
+  filter(if_any(starts_with("n_"), ~ . > 0))
+```
+
+```{r}
+knitr::kable(measurement_counts, caption = "Distribution of extracted indicators values per papers") %>% kableExtra::kable_styling()
+```
+
+We have `r dim(measurement_counts)[1]` unique papers.
+
+Compute overall totals and summary statistics on “total measurements per paper” (i.e. summing across all indicators).
+
+```{r}
+#  Overall totals & stats across *all* indicators per paper
+total_stats <- measurement_counts %>%
+  mutate(total_per_paper = rowSums(across(starts_with("n_")))) %>%
+  summarise(
+    n_papers    = n(),
+    grand_total = sum(total_per_paper),
+    mean        = mean(total_per_paper),
+    sd          = sd(total_per_paper),
+    median      = median(total_per_paper),
+    min         = min(total_per_paper),
+    max         = max(total_per_paper)
+  )
+```
+
+```{r}
+knitr::kable(total_stats, caption = "Global distribution and statistics") %>% kableExtra::kable_styling()
+```
+
+Summarise those counts across papers to get the total number of measurements per indicator and statistics (mean, sd, median, etc.)
+
+```{r}
+# Per-indicator summary across papers
+indicator_stats <- measurement_counts %>%
+  pivot_longer(cols      = starts_with("n_"),
+               names_to  = "indicator",
+               values_to = "n_measures") %>%
+  group_by(indicator) %>%
+  summarise(
+    papers_reported   = sum(n_measures >  0),
+    # papers with ≥1 measure
+    total_measures  = sum(n_measures),
+    # grand total
+    mean_per_paper    = mean(n_measures),
+    sd_per_paper      = sd(n_measures),
+    median_per_paper  = median(n_measures),
+    min_per_paper     = min(n_measures),
+    max_per_paper    = max(n_measures),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_measures))
+```
+
+```{r}
+knitr::kable(indicator_stats, caption = "Distribution of indicators in all works") %>% kableExtra::kable_styling()
+```
+
+## Choosing metrics to analysis
+
+```{r}
+data_long <- data_filled %>%
+  dplyr::select(all_of(c("bibtex", indicators)))  %>%
+  # Gather all the indicator columns into two new columns
+  pivot_longer(
+    cols = any_of(indicators), # Use any_of() in case some columns don't exist
+    names_to = "indicator",
+    values_to = "value",
+    values_drop_na = TRUE # Crucially, drop rows where the value is NA
+  ) %>%
+  # Separate the "indicator" column into its components
+  separate(
+    indicator, 
+    into = c("metric", "modalities"), 
+    sep = "\\.mode\\." # Splits the string at ".mode."
+  )
+
+```
+
+```{r}
+knitr::kable(head(data_long), caption = "Dataset inspection.") %>% kableExtra::kable_styling()
+```
+
+```{r}
+comparison_counts <- data_long %>%
+  count(.data[['metric']], .data[['modalities']], sort = TRUE)
+```
+
+```{r}
+knitr::kable(head(comparison_counts, n = 30), caption = "Dataset inspection.") %>% kableExtra::kable_styling()
+```
+
+```{r}
+comparison_counts_per_work <- data_long %>%
+  group_by(bibtex) %>%
+  count(.data[['metric']], .data[['modalities']], sort = TRUE)
+```
+
+```{r}
+knitr::kable(head(comparison_counts_per_work, n = 30), caption = "Dataset inspection.") %>% kableExtra::kable_styling()
+```
+
+```{r}
+comparison_unique_counts <- comparison_counts_per_work %>% 
+  ungroup() %>% 
+  count(.data[['metric']], .data[['modalities']], sort = TRUE)
+```
+
+```{r}
+knitr::kable(head(comparison_unique_counts, n = 30), caption = "Dataset inspection.") %>% kableExtra::kable_styling()
+```
+
+Rule of Thumb: For a statistical test, we ideally want at least 8-10 paired observations. Based on the counts above:
+
+-   text vs. text.image looks like a prime candidate for acc and f1score.
+
+## Average-then-Test: Overcoming the shortcoming of pseudoreplication
+
+### Data Preparation and Within-Study Aggregation: Statistical tests of the difference in the distributions of metrics values
+
+Preparing data frame with outcomes (data points for each metric).
+
+```{r}
+mode_diffs_per_article <- data.frame(
+  bibtex = data_clean$bibtex,
+  acc_mode_text_diff = data_clean$`acc.mode.text.image` - data_clean$`acc.mode.text`,
+  f1score_mode_text_diff = data_clean$`f1score.mode.text.image` - data_clean$`f1score.mode.text`
+)   %>% 
+  fill(bibtex, .direction = "down") %>%
+  filter(!(is.na(acc_mode_text_diff) &
+           is.na(f1score_mode_text_diff))) %>%
+group_by(bibtex)
+```
+
+#### Differences in indicators values
+
+Aggregate metrics' values per work (research paper).
+
+```{r}
+metrics_columns <- c("acc_mode_text_diff", "f1score_mode_text_diff")
+
+# Create summary for each bibtex and each metric
+bibtex_summary <- mode_diffs_per_article %>%
+  group_by(.data[['bibtex']]) %>%
+  summarise(
+    across(all_of(metrics_columns), summary_stats_grouped, .names = "{.col}"),
+    .groups = "drop"
+  )
+
+# Reshape the data to have metrics as rows for better readability
+bibtex_summary_long <- bibtex_summary %>%
+  pivot_longer(
+    cols = -.data[['bibtex']],
+    names_to = c("metric", "stat"),
+    names_pattern = "(.+)\\.(.+)",
+    values_to = "value"
+  ) %>%
+  pivot_wider(
+    names_from = stat,
+    values_from = value
+  )
+
+bibtex_summary_tables <- mode_diffs_per_article %>%
+  group_by(.data[['bibtex']]) %>%
+  group_map(~ {
+    paper_data <- .x[metrics_columns]
+    stats_list <- lapply(paper_data, summary_stats_grouped)
+    summary_df <- do.call(rbind, stats_list)
+    summary_df$Metric <- rownames(summary_df)
+    rownames(summary_df) <- NULL
+    summary_df$bibtex <- .y$bibtex
+    return(summary_df[, c("bibtex", "Metric", "Count", "Median", "Min", "Max", "Mean", "SD")])
+  })
+
+# Combine all tables
+final_summary <- do.call(rbind, bibtex_summary_tables)
+```
+
+```{r}
+knitr::kable(final_summary, 
+             caption = "Distribution of metrics per paper (bibtex)",
+             digits = 3) %>% 
+  kableExtra::kable_styling() %>%
+  kableExtra::collapse_rows(columns = 1, valign = "top")
+```
+
+Verification of data points count
+
+```{r}
+combined_summary <- do.call(rbind, bibtex_summary_tables)
+
+simple_metric_summary <- combined_summary %>%
+  group_by(.data[['Metric']]) %>%
+  summarise(
+    Total_Papers = n(),
+    Papers_with_Data = sum(Count > 0),
+    Total_Observations = sum(Count),
+    .groups = "drop"
+  )
+```
+
+```{r}
+knitr::kable(simple_metric_summary, 
+             caption = "Simple Metric Summary") %>% 
+  kableExtra::kable_styling()
+```
+
+Making histogram of metrics' mean values differences: enhanced version with consistent y-axis scales.
+
+```{r}
+# Prepare data for histograms - combine mean and median values
+histogram_data <- final_summary %>%
+  dplyr::select('bibtex', 'Metric', 'Mean', 'Median') %>%
+  filter(!is.na(Mean) | !is.na(Median)) %>%
+  pivot_longer(cols = c(.data[['Mean']], .data[['Median']]), 
+               names_to = "statistic", 
+               values_to = "value") %>%
+  filter(!is.na(value))
+
+# Create global palette for metrics
+metrics_list <- unique(histogram_data$Metric)
+
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(4))(length(metrics_list)),
+  metrics_list
+)
+```
+
+```{r}
+# Calculate y-axis limits for each statistic
+median_range <- histogram_data %>%
+  filter(statistic == "Median") %>%
+  pull(value) %>%
+  range(na.rm = TRUE)
+
+mean_range <- histogram_data %>%
+  filter(statistic == "Mean") %>%
+  pull(value) %>%
+  range(na.rm = TRUE)
+
+# Create scaled plots
+median_plots_scaled <- lapply(metrics_list, function(metric) {
+  create_summary_boxplot_scaled(histogram_data, metric, "Median", median_range, global_palette)
+})
+
+mean_plots_scaled <- lapply(metrics_list, function(metric) {
+  create_summary_boxplot_scaled(histogram_data, metric, "Mean", mean_range, global_palette)
+})
+
+# Arrange scaled version
+grid.arrange(grobs = c(median_plots_scaled, mean_plots_scaled), 
+             ncol = 2, nrow = 2,
+             top = "Distribution of Study-Level Performance Differences (Multimodal − Unimodal) \n(Top: Median, Bottom: Mean)")
+```
+
+Visualization to article
+
+```{r}
+clean_data <- preprocess_for_plotting(histogram_data)
+
+table(clean_data$Metric)
+table(histogram_data$Metric)
+
+metric_names <- c("Accuracy", "F1 Score")
+palette_colors <- pal_jco("default")(length(metric_names))
+my_palette <- setNames(palette_colors, metric_names)
+
+final_faceted_plot <- create_faceted_plot(clean_data, palette = my_palette, title = "Performance Gain of Multimodal over Unimodal Approaches", subtitle = "Distribution of study-level summary differences (Multimodal − Unimodal)")
+
+final_faceted_plot
+
+ggplot2::ggsave("fig-mm-difference.pdf", final_faceted_plot, width = 7.42, height = 8.46, units="in")
+```
+
+#### Performs the Shapiro-Wilk test of normality of difference metrics' values
+
+```{r}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data, 'acc_mode_text_diff', global_palette)
+```
+
+```{r}
+global_palette <- stats::setNames(
+  grDevices::colorRampPalette(ggsci::pal_jco("default")(2))(2),
+  unique(histogram_data$Metric)
+)
+
+create_normality_plots(histogram_data, 'f1score_mode_text_diff', global_palette)
+```
+
+Global statistics mean of means and median of medians.
+
+```{r}
+# Create summary statistics grouped by Metric and statistic
+histogram_summary <- histogram_data %>%
+  group_by(.data[['Metric']], .data[['statistic']]) %>%
+  summarise(
+    summary_stats_grouped(value),
+    .groups = "drop"
+  )
+
+knitr::kable(histogram_summary, 
+             caption = "Summary Statistics of Mean and Median Differences Values by Metric.",
+             digits = 3) %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  kableExtra::collapse_rows(columns = 1, valign = "top")
+```
+
+Prepare table to article
+
+```{r}
+clean_data <- preprocess_for_plotting(histogram_data)
+
+summary_table_data <- clean_data %>%
+  group_by(Metric, statistic) %>%
+  summarise(
+    N = n(),
+    Min = min(Difference, na.rm = TRUE),
+    Q1 = quantile(Difference, 0.25, na.rm = TRUE),
+    Median = median(Difference, na.rm = TRUE),
+    Mean = mean(Difference, na.rm = TRUE),
+    Q3 = quantile(Difference, 0.75, na.rm = TRUE),
+    Max = max(Difference, na.rm = TRUE),
+    SD = sd(Difference, na.rm = TRUE),
+    .groups = "drop" # Ungroup after summarising
+  ) %>%
+  # Arrange for better readability
+  arrange(Metric, statistic)
+```
+
+```{r}
+knitr::kable(summary_table_data, 
+             caption = "Descriptive Statistics for Study-Level Performance Differences.",
+             digits = 3) %>% 
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  kableExtra::collapse_rows(columns = 1, valign = "top")
+```
+
+```{r}
+latex_table_code <- summary_table_data %>%
+  # Use kable() with formatting for LaTeX
+  kable(
+    format = "latex",
+    booktabs = TRUE, # Creates professional horizontal lines (\toprule, \midrule, etc.)
+    digits = 2,      # Round all numbers to 2 decimal places
+    caption = "Descriptive Statistics for Study-Level Performance Differences.",
+    label = "tab:summary_stats", # For referencing in text with \ref{tab:summary_stats}
+    col.names = c("Metric", "Stat.", "N", "Min", "Q1", "Median", "Mean", "Q3", "Max", "SD")
+  ) %>%
+  # Use kable_styling for a better look
+  kable_styling(latex_options = c("striped", "scale_down")) %>%
+  # Group rows by Metric for excellent readability
+  group_rows(index = table(summary_table_data$Metric))
+
+# Print the code to the console
+print(latex_table_code)
+```
+
+Our choice of statistical tests was guided as before for multiview approaches analysis.
+
+### Inferential Testing Across Studies: Statistical tests of the difference in the distributions of metrics values
+
+#### Permutation test
+
+```{r}
+# Define metrics from histogram_data
+metrics <- unique(histogram_data$Metric)
+
+# Run the permutation test for each metric
+all_perm_stats <- t(sapply(metrics, get_permutation_stats, data = histogram_data))
+
+# Convert to a data frame for nice formatting
+results_perm <- data.frame(
+  metric = metrics,
+  all_perm_stats,
+  significant = ifelse(!is.na(all_perm_stats[, "p_value"]) & all_perm_stats[, "p_value"] < 0.05, "Yes", "No"),
+  stars = ifelse(
+    is.na(all_perm_stats[, "p_value"]), "NA",
+    ifelse(all_perm_stats[, "p_value"] < 0.001, "***",
+    ifelse(all_perm_stats[, "p_value"] < 0.01, "**",
+    ifelse(all_perm_stats[, "p_value"] < 0.05, "*", "ns")))
+  ),
+  effect = ifelse(
+    is.na(all_perm_stats[, "cohens_d"]), "NA",
+    # Interpretation for Cohen's d
+    # Note: we use abs() for magnitude regardless of direction
+    ifelse(abs(all_perm_stats[, "cohens_d"]) < 0.2, "Negligible",
+    ifelse(abs(all_perm_stats[, "cohens_d"]) < 0.5, "Small",
+    ifelse(abs(all_perm_stats[, "cohens_d"]) < 0.8, "Medium", "Large")))
+  )
+)
+
+rownames(results_perm) <- NULL
+```
+
+```{r}
+knitr::kable(results_perm, 
+             caption = "Permutation test - Testing if mean differences differ from zero.",
+             col.names = c("Metric", "Observed Mean", "p-value", "Cohen's d", "n", "Significant (p<0.05)", " ", "Effect Size"),
+             digits = 3) %>%
+  kableExtra::kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+To test for a significant difference, a one-sample permutation test (9,999 permutations) was conducted on the paired performance differences. The results demonstrate a clear and consistently positive effect of multimodality on the mean performance. For **Accuracy**, the multimodal approach yielded a mean improvement of **5.62 percentage points** (N=27, p \< .001), a robust effect size (Cohen's d = 0.80). A similarly significant enhancement was observed for the **F1-score**, which increased by an average of **3.93 points** (N=16, p \< .001) with a large corresponding effect size (Cohen's d = 1.39).
+
+In summary, these findings provide strong statistical evidence that augmenting text-based models with additional modalities is a highly effective strategy for significantly enhancing classification performance.
+
+#### Wilcoxon signed-rank test and effect size r (rank-biserial correlation)
+
+```{r}
+metrics <- unique(histogram_data$Metric)
+
+# Get all test results using the function
+all_stats_corrected <- t(sapply(metrics, get_wilcox_stats_corrected, data = histogram_data))
+
+# Convert to data frame and add interpretations
+results_corrected <- data.frame(
+  metric = metrics,
+  all_stats_corrected,
+  significant = ifelse(!is.na(all_stats_corrected[, "p"]) & all_stats_corrected[, "p"] < 0.05, "Yes", "No"),
+  stars = ifelse(is.na(all_stats_corrected[, "p"]), "NA",
+                 ifelse(all_stats_corrected[, "p"] < 0.001, "***",
+                 ifelse(all_stats_corrected[, "p"] < 0.01, "**",
+                 ifelse(all_stats_corrected[, "p"] < 0.05, "*", "ns")))),
+  effect = ifelse(is.na(all_stats_corrected[, "r"]), "NA",
+                  ifelse(abs(all_stats_corrected[, "r"]) < 0.1, "Negligible",
+                  ifelse(abs(all_stats_corrected[, "r"]) < 0.3, "Small",
+                  ifelse(abs(all_stats_corrected[, "r"]) < 0.5, "Medium", "Large"))))
+)
+
+
+rownames(results_corrected) <- NULL
+```
+
+```{r}
+# Create formatted table
+knitr::kable(results_corrected, 
+             caption = "Wilcoxon signed-rank test - Testing if mean differences differ from zero",
+             digits = 4) %>% 
+  kableExtra::kable_styling()
+```
+
+To assess the robustness of these findings to potential outliers, we conducted a non-parametric Wilcoxon signed-rank test. This test strongly corroborates our initial findings by confirming a highly significant positive shift in the median performance difference for both **Accuracy** (V = 376, p \< .001) and **F1-score** (V = 136, p \< .001). This indicates the advantage of multimodality is a consistent positive shift in typical performance, not merely an artifact of the mean being skewed by extreme values. While the associated rank-biserial correlation effect size (r) was large for both, the significant p-values provide the most reliable evidence of a genuine effect.
+
+#### Calculate Cliff's Delta
+
+Cliff's Delta (d) is an effect size of dominance. It answers the question:
+
+-   If I pick a random value from group A and a random value from group B, what is the probability that the value from A is larger, minus the probability that the value from B is larger? (It ranges from -1 to 1.)
+
+```{r}
+# Define the metrics
+metrics <- c("acc", "f1score")
+# Initialize data frame to store results
+cliff_summary <- data.frame(
+  Metric = character(),
+  Delta = numeric(),
+  CI_Lower = numeric(),
+  CI_Upper = numeric(),
+  Magnitude = character(),
+  N = integer(),
+  Mean_Single = numeric(),
+  Mean_Combo = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Calculate Cliff's Delta for each metric
+for (metric in metrics) {
+  # Prepare data for this metric
+  cliff_data <- prepare_cliff_data(metric, data_clean, aggregation_method = "mean", single_col = ".mode.text", combo_col = ".mode.text.image")
+  
+  # Skip if no valid data
+  if (is.null(cliff_data) || nrow(cliff_data) < 3) {
+    next
+  }
+  
+  # Calculate Cliff's Delta (combinations vs single)
+  result <- cliff.delta(cliff_data$combo_view, cliff_data$single_view, paired = TRUE)
+  
+  # Add to summary data frame
+  cliff_summary <- rbind(
+    cliff_summary,
+    data.frame(
+      Metric = metric,
+      Delta = result$estimate,
+      CI_Lower = result$conf.int[1],
+      CI_Upper = result$conf.int[2],
+      Magnitude = result$magnitude,
+      N = nrow(cliff_data),
+      Mean_Single = mean(cliff_data$single_view),
+      Mean_Combo = mean(cliff_data$combo_view),
+      Mean_Difference = mean(cliff_data$combo_view)-mean(cliff_data$single_view),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+rownames(cliff_summary) <- NULL
+```
+
+```{r}
+knitr::kable(cliff_summary, 
+             caption = "Cliff's Delta - Effect Size for Combinations vs Single View (Levels: negligible < small < medium < large)",
+             digits = 4) %>% 
+  kableExtra::kable_styling()
+```
+
+```{r}
+# Print formatted results
+cat("\nCliff's Delta Effect Size Results (Combinations vs Single View):\n")
+cat("================================================================\n")
+for (i in 1:nrow(cliff_summary)) {
+  row <- cliff_summary[i, ]
+  cat(
+    sprintf(
+      "\n%s: δ = %.4f (95%% CI: %.4f to %.4f), %s effect, n = %d\n",
+      toupper(row$Metric),
+      row$Delta,
+      row$CI_Lower,
+      row$CI_Upper,
+      row$Magnitude,
+      row$N
+    )
+  )
+  cat(sprintf("  Mean Single View: %.2f, Mean Combinations: %.2f\n", 
+              row$Mean_Single, row$Mean_Combo))
+}
+```
+
+To quantify the effect size from a non-parametric, probabilistic perspective, we calculated Cliff's Delta. This metric assesses the probability that a randomly chosen multimodal system outperforms a unimodal one. For **Accuracy**, the delta of **0.31** suggests a small-to-medium probabilistic advantage. For **F1-Score**, the delta was **0.27**.
+
+Critically, for both metrics, the 95% confidence intervals were wide and crossed zero (Accuracy CI: [-0.01, 0.57]; F1-Score CI: [-0.15, 0.60]). This finding adds crucial nuance to our analysis. While the permutation and Wilcoxon tests confirm the *average* effect is likely not zero, the Cliff's Delta CIs reveal substantial **uncertainty about the effect's magnitude and consistency.** The data are compatible with anything from a negligible effect to a large one, highlighting the variability in outcomes across studies.
+
+### Discussion
+
+Our preliminary statistical tests paint a nuanced and consistent picture. On one hand, both the permutation and Wilcoxon signed-rank tests provide strong, converging evidence that the central tendency (mean and median) of the performance improvement is significantly greater than zero for both Accuracy and F1-Score. This confirms a genuine positive effect is present.
+
+On the other hand, the Cliff's Delta analysis reveals that despite the positive average effect, there is considerable uncertainty and variability in the magnitude of this effect. The wide confidence intervals, which include zero, indicate that while the multimodal approach is beneficial on average, we cannot be highly confident in the consistency or size of this advantage from one context to another.
+
+Together, these findings motivate the need for a formal meta-analysis. We have established an average positive effect, but to properly quantify the magnitude of this effect and, most importantly, to investigate the sources of the high variability between studies, a more sophisticated modeling approach is required.
+
+## Meta-analysisi: A deeper insight analysis
+
+Our meta-analyses are based on a relatively small number of studies for each outcome metric (k ranges from 16 to 27). In such cases, standard meta-analytic methods can underestimate the between-study variance and produce overly narrow confidence intervals, potentially leading to an increased risk of Type I errors. To address this, we employ Robust Variance Estimation (RVE), as implemented in the R package clubSandwich. The RVE method provides more conservative and reliable confidence intervals and p-values, making our findings more trustworthy and defensible given the size of our sample.
+
+Our primary analytical model is a weighted random-effects model using Robust Variance Estimation. This model is our most defensible estimate, as it weights studies by their precision (inverse variance) while applying the necessary small-sample corrections. To assess the robustness of our findings, we also present results from an unweighted RVE model, which treats each study equally, regardless of its precision. Finally, for transparency and to illustrate the impact of the RVE correction, we also report the results from a standard random-effects model without the robust estimation. This report will apply this analytical strategy to two key performance metrics: Accuracy and F1-Score.
+
+Several key decisions and assumptions underpin our statistical models:
+
+-   Effect Size Metric: As all primary outcome metrics (Accuracy, F1-Score) are reported on a common percentage scale (0-100), we selected the Raw Mean Difference (RMD) as our effect size for its direct interpretability. The effect size for each study i was calculated as yi = Mean_multimodal - Mean_unimodal.
+-   Imputation of Missing Standard Deviations: A subset of studies reported performance as a single point estimate without a measure of variance (i.e., standard deviation). For these studies, we imputed the standard deviation using the pooled average SD calculated from studies that did provide this information, a common practice in meta-analysis to enable their inclusion in a weighted model.
+-   Study-Level Variance Calculation: The variance of the mean difference for each study was calculated under the assumption of independent groups. We acknowledge this is a simplification, as the unimodal and multimodal results from a single paper are inherently paired and thus correlated. However, as the within-study correlation (ri) is almost never reported, this assumption is a practical necessity. It is a limitation of this report, and by ignoring a likely positive correlation, our calculation may overestimate the true study-level sampling variance.
+
+```{r}
+metrics_to_analyze <- list(
+  list(comb = "acc.mode.text.image", single = "acc.mode.text", name = "Accuracy"),
+  list(comb = "f1score.mode.text.image", single = "f1score.mode.text", name = "F1-Score")
+)
+
+all_results <- list()
+
+for (metric in metrics_to_analyze) {
+  all_results[[metric$name]] <- perform_meta_analysis(
+    raw_data_frame = data_filled,
+    col_comb = metric$comb,
+    col_single = metric$single,
+    metric_name = metric$name
+  )
+}
+```
+
+### Publication bias analysis
+
+```{r}
+metric_names <- names(all_results) # e.g., "Accuracy", "F1-Score", "Precision", "Recall"
+print(metric_names)
+```
+
+
+```{r}
+name <- "Accuracy"
+check_publication_bias(all_results[[name]], name, "mm")
+```
+
+```{r}
+name <- "F1-Score"
+check_publication_bias(all_results[[name]], name, "mm")
+```
+
+### Standard (Inverse-Variance Weighted) Random-Effects Model (Gold Standard)
+
+This model answers the question:
+
+-   What is the average effect if we give more weight to studies that provide more precise estimates (i.e., larger n, smaller sd)? This is the standard approach. To do this, we need to handle the studies with n=1. The best practice is data imputation: we will "fill in" a reasonable estimate for the missing standard deviations.
+
+#### Weighted Random-Effects Model: Accuracy
+
+```{r}
+print("--- Weighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$weighted_rve)
+```
+
+```{r}
+forest(all_results$Accuracy$weighted_rve,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r}
+print("--- Weighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$weighted)
+```
+
+```{r}
+forest(all_results$Accuracy$weighted,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+Our primary meta-analysis for the Accuracy metric was performed on 27 studies using a robust random-effects model with inverse-variance weighting. This approach gives more weight to studies providing more precise estimates, while the robust variance estimation corrects for the small number of studies, providing more reliable confidence intervals and p-values.
+
+The analysis revealed a statistically significant overall benefit for multimodal approaches. On average, multimodal models outperformed their strongest unimodal counterparts by an estimated +5.28 percentage points in accuracy (95% CI: [2.23, 8.32], p = 0.0016). The fact that the confidence interval is entirely above zero provides strong evidence that this advantage is not due to chance.
+
+However, this overall effect must be interpreted with caution due to the extremely high heterogeneity observed between studies (I² = 82.63%, Q(26) = 90.7, p \< .0001). This indicates that a single summary estimate of +5.28 does not tell the whole story; the true advantage of multimodality is highly variable and likely depends on factors such as the specific task, the modalities being fused, or the dataset used. Therefore, while we can confidently conclude that an advantage exists on average, the primary finding is the variability of this advantage. This high I² value necessitates further investigation through subgroup analysis to explore the sources of this variation.
+
+#### Weighted Random-Effects Model: F1-score
+
+```{r}
+print("--- Weighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$weighted_rve)
+```
+
+```{r}
+forest(all_results$`F1-Score`$weighted_rve,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r}
+print("--- Weighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$weighted)
+```
+
+```{r}
+forest(all_results$`F1-Score`$weighted,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+The meta-analysis for F1-Score, performed on 16 studies, yielded notably different results from the Accuracy analysis.
+
+First, we observed a low and statistically non-significant level of heterogeneity (I² = 10.45%, Q(15) = 7.64, p = 0.94). This suggests that the impact of multimodality on F1-Score is far more consistent across different studies, datasets, and tasks than it was for Accuracy.
+
+When synthesizing the results, the choice of statistical model was critical. A standard random-effects model produced a statistically significant result (p = 0.006), suggesting a clear benefit. However, our primary and more appropriate robust random-effects model told a different story.
+
+The robust analysis estimated an average improvement of +3.29 percentage points in F1-Score, but this effect was not statistically significant at the conventional α=0.05 level (95% CI: [-0.02, 6.60], p = 0.051).
+
+Conclusion: Although there is a positive trend suggesting a benefit of around 3 percentage points, the confidence interval narrowly includes zero. Therefore, based on the available evidence, we cannot confidently reject the null hypothesis of no effect. The discrepancy between the standard and robust models highlights the importance of using small-sample corrections; in this case, it prevented a potential Type I error. The finding suggests that while multimodality shows a strong and variable advantage for overall Accuracy, its benefit for the F1-Score—a metric sensitive to class imbalance—is less certain and more modest.
+
+### Unweighed Random-Effects Model
+
+This model answers the question:
+
+-   What is the average effect if we treat every study as equally important, regardless of its size or precision?
+
+#### Unweighed Random-Effects Model: Accuracy
+
+```{r}
+print("--- Unweighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$unweighted_rve)
+```
+
+```{r}
+forest(all_results$Accuracy$unweighted_rve,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r}
+print("--- Unweighted Model (All studies equal): Accuracy ---")
+summary(all_results$Accuracy$unweighted)
+```
+
+```{r}
+forest(all_results$Accuracy$unweighted,
+       slab = all_results$Accuracy$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in Accuracy",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+To test the robustness of our primary finding for the Accuracy metric, we conducted a sensitivity analysis using an unweighed random-effects model. This approach treats each of the 27 studies as equally important, regardless of their individual sample size or precision, providing a check against the possibility that our main result was disproportionately influenced by a few high-precision studies.
+
+The unweighed model corroborates our primary conclusion. The analysis yielded a pooled effect estimate of +5.62 percentage points (95% CI: [2.79, 8.45], p = 0.0006). This result is not only highly statistically significant but also very similar in magnitude to our primary weighted estimate of +5.28.
+
+Conclusion: The consistency of these findings demonstrates that the significant advantage of multimodal approaches for Accuracy is a robust result and not an artifact of the inverse-variance weighting scheme. Whether studies are weighted by their precision or treated as equals, the data converge on the same conclusion: there is a clear and significant performance benefit to using multimodal systems. This strengthens our confidence in the primary analysis.
+
+#### Unweighed Random-Effects Model: F1-score
+
+```{r}
+print("--- Unweighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$unweighted_rve)
+```
+
+```{r}
+forest(all_results$`F1-Score`$unweighted_rve,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+```{r}
+print("--- Unweighted Model (All studies equal): F1-score ---")
+summary(all_results$`F1-Score`$unweighted)
+```
+
+```{r}
+forest(all_results$`F1-Score`$unweighted,
+       slab = all_results$`F1-Score`$effect_sizes$studylab,
+       header = "Study",
+       xlab = "Mean Difference in F1-score",
+       mlab = "RE Model Summary",
+       cex = 0.8)
+```
+
+We next conducted an unweighed sensitivity analysis for the F1-Score to check the robustness of our primary (weighted) finding of a non-significant effect. The results of this analysis were striking and revealed a fundamental instability in the F1-Score data.
+
+In a notable reversal of our primary analysis, the unweighed **robust model showed a highly significant positive effect** of +3.93 percentage points (95% CI: [2.37, 5.50], p = 0.0005). Adding to the complexity, the standard (non-robust) unweighed model applied to the exact same data **did not show a significant effect**, yielding a p-value of 0.0657 (95% CI: [-0.26, 8.12]).
+
+### Metric values discussion
+
+Below we present table contains all experiment results.
+
+| Metric | Model Type | RVE Correction | Estimate | 95% CI Lower | 95% CI Upper | p-value |
+|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
+| Accuracy | **Weighted** | **Yes** | **5.2760** | **2.2344** | **8.3177** | **0.0016** |
+|  | Weighted | No | 5.2760 | 2.4091 | 8.1429 | 0.0003 |
+|  | Unweighed | Yes | 5.6167 | 2.7879 | 8.4456 | 0.0006 |
+|  | Unweighed | No | 5.6167 | 2.3716 | 8.8619 | 0.0007 |
+| F1-score | **Weighted** | **Yes** | **3.2869** | **-0.0237** | **6.5976** | **0.0511** |
+|  | Weighted | No | 3.2869 | 0.9574 | 5.6165 | 0.0057 |
+|  | Unweighed | Yes | 3.9334 | 2.3672 | 5.4997 | 0.0005 |
+|  | Unweighed | No | 3.9334 | -0.2552 | 8.1220 | 0.0657 |
+
+#### Explaining the Divergence Between Accuracy and F1-Score Findings (Weighted Random-Effects Model)
+
+A central finding of our work is the stark contrast between the meta-analytic results for Accuracy (a strong, significant, and highly heterogeneous effect) and F1-Score (a marginal, non-significant, and homogeneous effect). This divergence can be attributed to two fundamental issues revealed by a deeper inspection of the data: differences in the underlying body of evidence and disparities in data quality.
+
+-   Data Provenance: The two analyses are not performed on the same set of literature. The Accuracy analysis includes 27 studies, while the F1-Score analysis includes 16, with significant non-overlap between them. They are, in effect, summarizing two different, albeit related, research streams. The literature reporting Accuracy may inherently include more examples of tasks where multimodality provides a profound benefit (e.g., tasks with less class imbalance).
+
+-   Data Quality and the Impact of Imputation: The most critical factor is the methodological artifact introduced by the necessary imputation of variance in the F1-Score dataset. Nearly half of the studies (7 of 16) in this analysis were assigned a large, identical variance (vi = 76.2), which had a profound two-fold effect:
+
+    -   Artificial Suppression of Heterogeneity: The attribution of large sampling variance to multiple studies led the model to conclude that their effect sizes were consistent with one another, resulting in a low and non-significant heterogeneity estimate (I² = 10.5%). The observed homogeneity is therefore, at least in part, an artifact of data imputation rather than a reflection of true consistency in the field.
+
+    -   Distortion of the Pooled Estimate: In an inverse-variance weighted model, these high-variance imputed studies were given minimal weight. Consequently, the final pooled estimate of +3.29 is disproportionately influenced by a small handful of studies that reported very high precision (e.g., ghorbanali2024). This means the F1-Score result is not a robust average across the field but rather reflects the findings of a select few studies.
+
+Conclusion: In summary, the Accuracy result likely reflects a genuine, highly variable performance gain across a broad and diverse set of research contexts. In contrast, the F1-Score result represents a tentative positive trend from a smaller, methodologically compromised dataset. Its marginal, non-significant finding is a product of both a potentially more modest true effect for this metric and statistical artifacts that question the representativeness of the pooled estimate. This highlights a critical challenge for meta-research in machine learning: the conclusions are not only dependent on what is published, but on the quality of the statistical reporting within those publications.
+
+#### F1-Score Findings (Weighted Random-Effects Model) vs Unweighed model results discussion
+
+The meta-analysis for F1-Score produced conflicting results that hinge directly on the choice of statistical model, revealing a fundamental instability in the available evidence. While our primary, "gold standard" weighted analysis suggested a non-significant benefit (+3.29, p = 0.051), a sensitivity analysis using an unweighed "democratic" model showed a notable reversal: a highly significant positive effect of +3.93 percentage points (95% CI: [2.37, 5.50], p = 0.0005).
+
+This reversal demonstrates that the result is highly sensitive to the inverse-variance weighting scheme. The weighted model, compromised by the necessary imputation of large variances for many studies, gave minimal weight to a large portion of the literature. By giving every study an equal vote, the unweighed model revealed that these down-weighted studies tended to report larger effects, pulling the pooled estimate up to a level of clear statistical significance.
+
+This presents a methodological dilemma. We cannot, in good faith, ignore the non-significant result from the standard weighted model. However, the strong positive finding in the unweighed analysis prevents us from definitively concluding there is no effect. This instability, driven by heavy reliance on variance imputation, means the evidence is too methodologically fragile to support a single, confident conclusion.
+
+Therefore, the most responsible interpretation is that while the trend for F1-Score is positive, the true effect cannot be reliably determined without higher-quality statistical reporting in primary studies. This stands in sharp contrast to the robust and consistent findings for the Accuracy metric, where both weighted and unweighed analyses converged on the same significant conclusion.
+
+### Choosing promising works and discussion
+
+We performed an analysis that identifies the most promising papers and formulates data-driven hypotheses about *why* they performed so well.
+
+#### Strategy: Finding of Promising Papers
+
+The goal is to identify studies that show an unusually large performance gain (a large positive effect size, `yi`) from using a multiview approach. We will use two key criteria:
+
+-   **Magnitude of Effect:** Look for the highest `yi` values in both the Accuracy and F1 Score tables.
+
+-   **Robustness:** A paper that performs exceptionally well on *both* metrics is a stronger candidate than one that excels at only one.
+
+After identifying the top performers, we will cross-reference them with our taxonomy to uncover patterns in their methods.
+
+#### Analysis and Identification of Promising Papers
+
+Based on the meta-analysis results, three papers stand out as exceptionally promising due to their large and consistent performance gains.
+
+##### Promising Paper 1: braz2020
+
+Task: Healthcare (Musculoskeletal Abnormality Detection). This is a high-stakes, specific domain.
+
+Taxonomy Tags: Healthcare, Text + Image, Early Fusion, Domain-specific Dataset.
+
+Data: Accuracy Gain (yi): +26.87 F1-Score Gain (yi): Not Available
+
+Reasoning: Despite lacking F1-Score data, the magnitude of the accuracy improvement is an extreme outlier and cannot be ignored. A gain of nearly 27 percentage points is extraordinary. Understanding this result is critical, even if its robustness is unknown.
+
+Hypothesis for Investigation: The technique in braz2020 might be exceptionally good at solving a specific type of classification problem (e.g., one with a large, easily identifiable negative class, boosting specificity and thus accuracy). Alternatively, the dataset or task may have unique properties that make it especially amenable to their multimodal approach. The investigation should focus on what makes this case so different from the others.
+
+A look at the raw data from one of their experiments reveals the impact:
+
+-   image (only): 82.96% acc
+
+-   text (synthetic, only): 57.62% acc
+
+-   text.image (fused): 84.17% acc
+
+The Multimodal Relationship: Information Condensation In this unique case, the relationship is not natural; it's engineered. The text modality is not an independent source of information but rather a distilled, semantic summary of the visual modality. Words like "fracture" or "normal wrist" condense the information from thousands of pixels into a handful of high-level concepts.
+
+Challenge: The MURA dataset only has images, not textual reports.
+
+Key Innovation: The authors first trained a caption generator on a different medical dataset (ROCO) to artificially create textual data for the MURA images. They then used a standard DenseNet-169 (image) and BERT (text) model, fusing the features via simple concatenation.
+
+Why It Works: braz2020 is a ground-breaking example of creative data engineering. Its success demonstrates that the benefits of multimodality can be unlocked even when a task is not naturally multimodal, proving that generating a "semantic companion" modality can lead to state-of-the-art results.
+
+Conclusion: The extraordinary performance jump comes from bootstrapping a multimodal solution where one modality was entirely absent. The paper is promising because it demonstrates that even imperfect, artificially generated text can act as a semantic signal to regularize and improve a strong visual classifier. Even though the synthetically generated text is a weak classifier on its own, fusing it with the strong image model provides a consistent and significant performance boost.
+
+##### Promising Paper 2: liangz2023
+
+Task: Fake News Detection. This task requires detecting semantic incongruity.
+
+Taxonomy Tags: Fake news detection, Text + Image, Attention Fusion.
+
+This paper is example of a robust positive deviant, showing strong, consistent gains across both metrics.
+
+-   Accuracy Effect Size (yi): 5.85
+-   F1-Score Effect Size (yi): 4.90
+
+Data-Driven Hypothesis: Why is liangz2023 so promising?
+
+Consistent, Reliable Improvement: Unlike the complex interactions in kenny2023, the method in liangz2023 shows a consistently positive and significant gain from adding the image modality across multiple experimental setups. This suggests that their fusion architecture is not a one-off success but is robust and generalizable.
+
+The Multimodal Relationship: Semantic Incongruity Detection In fake news, the text and image are not just complementary; the model must check if they are consistent. Does the image actually depict what the text claims? Is there a subtle mismatch? This is a sophisticated reasoning task.
+
+Key Innovation: This work uses a much more sophisticated architecture. It doesn't just concatenate unimodal features.
+
+It explicitly uses: A pre-trained Vision-Language model (BLIP) to get a native multimodal representation. A cross-modal attention module to intelligently fuse the features from text (XLNet), image (VGG-19), and the vision-language model (BLIP).
+
+Why It Works: This is precisely what Attention Fusion is designed for. A simple concatenation (braz2020) might not be enough. The cross-modal attention mechanism allows the model to learn which parts of the image are most relevant to which words in the text, and vice-versa. It excels at identifying the subtle (or overt) clashes that are hallmarks of misinformation. The paper's success is tied to using the right tool (Attention) for a complex reasoning job.
+
+Conclusion: The strength of liangz2023 is not in a single massive gain but in its consistent, robust improvement powered by a state-of-the-art fusion mechanism (attention) designed for complex reasoning.
+
+##### Promising Paper 1: kenny2023
+
+Task: Emotion Recognition
+
+Taxonomy Tags: Emotion recognition, Text + Image + Audio, Early Fusion, Domain-specific Dataset (IEMOCAP).
+
+This paper stands out as a strong candidate because it appears high on both the Accuracy and F1-Score lists, demonstrating the robustness.
+
+-   Accuracy Effect Size (yi): 6.03
+-   F1-Score Effect Size (yi): 9.00
+
+Data-Driven Hypothesis: Why is kenny2023 so promising?
+
+Exceptionally Strong Non-Text Modalities: The most striking feature is the incredible performance of the unimodal image (98.4 acc) and audio (98.21 acc) classifiers. They outperform the text modality by a large margin. This is unusual, as text is often the most information-rich modality. This paper tackles a problem where visual and auditory cues are powerful enough to rival or exceed textual information.
+
+Synergy in F1-Score, Not Necessarily Accuracy: While the text.image fusion (93.89 acc) improves upon text-only, it's actually worse than image-only. However, for the F1-Score, the text.image fusion (76.5) provides a massive +9 point gain over text-only (67.5) and an even larger gain over image-only (57.75).
+
+The Multimodal Relationship: Synergistic Expression In emotion recognition, the tone of voice (audio), facial expression (image/video), and spoken words (text) are all direct, simultaneous signals of the same underlying latent state: the person's emotion. They are complementary and mutually reinforcing. For example, sarcastic text with a happy tone of voice means something different than sincere text with a happy tone.
+
+Insight: The "Complementary Modalities" Pattern This paper's success is the textbook example of why multimodality works. It tackles Emotion Recognition, a task where the information is naturally spread across different channels.
+
+-   The text provides the semantic content ("what" is being said).
+
+-   The image (facial features) provides the visual expression.
+
+-   The audio provides the prosody, tone, and intonation (the "how" it is being said).
+
+For a task like emotion, any single modality is insufficient. A sarcastic "That's great" has positive text but negative audio tone. A pained smile has positive visual cues but negative underlying emotion. kenny2023's high performance comes from fusing these highly complementary, non-redundant sources of information. The large F1-score gain (+9.00) is a direct result of the audio and visual cues resolving ambiguities that text-only models cannot.
+
+Why It Works: Fusing these highly correlated signals provides a much more complete and robust picture than any single modality alone. The paper succeeded because the fusion captures this synergy, leading to a huge F1-score gain, which balances precision and recall effectively.
+
+#### Hypothesis
+
+Here we define three data-driven hypotheses for multimodal approaches:
+
+**Hypothesis 1: The Semantic Relationship Between Modalities Dictates the Optimal Fusion Strategy.**
+
+-   We see two distinct, successful patterns. In kenny2023's Emotion Recognition task, the modalities (voice, face, text) are synergistic expressions of the same latent state (emotion). Fusing them provides complementary information and yields a massive F1-score gain (+9.00 yi). In contrast, liangz2023's Fake News Detection task requires checking for semantic incongruity between text and image. This complex reasoning demanded a sophisticated Attention Fusion mechanism. The choice of fusion architecture was dictated not by a general rule, but by the intrinsic relationship between the data sources for that specific task.
+
+**Hypothesis 2: Modal-Level Augmentation is an Efficient Strategy for Unlocking Incremental Gains.**
+
+-   The braz2020 paper is the key example. While we point out that the absolute gain over the image-only model is a modest \~1-2 percentage points, the significance of this finding lies not in its magnitude, but in its methodology and efficiency. It Unlocks Performance Where Unimodal Models Plateau: In a competitive domain like medical imaging, a consistent 1-2% gain is highly valuable. braz2020 achieved this not by creating a more complex and expensive vision model, but by adding a cheap, synthetic "semantic hint" via generated text.
+
+-   It Represents a New Avenue for Improvement: This strategy suggests that when optimizing a single modality yields diminishing returns, the most efficient path to further improvement may be to augment the data space itself by engineering a companion modality. This is likely more cost-effective than building a new, larger unimodal architecture from scratch for the same incremental gain.
+
+**Hypothesis 3: State-of-the-Art Performance is Driven by the Fusion of Powerful, Pre-trained Unimodal Backbones.**
+
+-   **Evidence**: This is a unifying thread across all top performers. The success of these papers is inseparable from their use of large, pre-trained models as feature extractors:
+
+    -   kenny2023 used pre-trained BERT.
+
+    -   braz2020 used pre-trained DenseNet-169 and BERT.
+
+    -   liangz2023 used pre-trained XLNet, VGG-19, and the vision-language model BLIP.
+
+-   This demonstrates that the modern multimodal paradigm is less about learning features from scratch and more about effectively aligning and integrating the rich feature spaces of foundational models. The fusion architecture's primary role is to act as a "smart bridge" between these powerful, pre-existing backbones.
+
+## Summary
+
+We conducted a two-stage analysis to investigate whether multimodal approaches outperform unimodal text-only approaches.
+
+The first stage was an exploratory analysis designed to establish the presence and robustness of an effect by asking three preliminary questions:
+
+1.  Is there a statistically significant difference in the mean reported outcomes?
+
+2.  Is this finding robust to the influence of potential outliers?
+
+3.  What is the probabilistic magnitude and uncertainty of the difference between the two groups?
+
+The second stage was the primary, confirmatory analysis, which employed a robust, inverse-variance weighted meta-analysis. This more sophisticated approach synthesizes the evidence to answer a more precise, overarching research question:
+
+1.  What is the best estimate of the true average effect of the multimodal approach, and how does the choice of statistical model impact this conclusion?
+
+### Exploratory Analysis: Establishing the Signal
+
+To first establish whether a detectable signal exists in the literature, we conducted a series of non-parametric tests on the study-level performance differences. A permutation test revealed a highly significant positive effect for both Accuracy and F1-Score (p \< .001 for both).
+
+To ensure these findings were not driven by outlier studies, a Wilcoxon signed-rank test confirmed these results, indicating the median effect was also significantly positive for both metrics. This suggests the advantage of a multimodal approach is a typical finding in the reported literature.
+
+Finally, to assess the practical magnitude and consistency, Cliff's Delta was calculated. While this pointed to a positive effect, the wide 95% confidence intervals for both metrics crossed zero. This introduced critical nuance, highlighting substantial uncertainty about the effect's true magnitude and consistency across studies and underscoring the need for a more powerful meta-analytic model.
+
+### Primary Analysis: Quantifying the Effect and Uncovering Model Dependence
+
+Building on the exploratory findings, we conducted a full inverse-variance weighted random-effects meta-analysis to derive the most precise estimate of the average effect. The results, however, differed starkly by metric and revealed a critical dependence on the statistical model.
+
+For Accuracy, the meta-analysis confirmed a clear and significant benefit. We found a robust average improvement of +5.28 percentage points (p = 0.0016), validating the strong signal from the exploratory phase.
+
+In stark contrast, the analysis for F1-Score revealed the fragility of the underlying evidence. Our primary weighted model found a marginal, non-significant improvement of +3.29 points (p = 0.0511). This result directly contradicts the highly significant finding from the unweighed exploratory tests and a separate unweighed sensitivity analysis.
+
+### Synthesis of Findings
+
+Our two-stage analytical approach provides a nuanced conclusion that differs significantly by the metric of interest. For Accuracy, the evidence is convergent and robust: the exploratory and primary analyses both point to a consistent and statistically significant, though highly variable, performance gain.
+
+For F1-Score, the story is one of model-dependence and methodological fragility. The contradiction between the unweighed and weighted analyses highlights that the conclusion is highly sensitive to statistical artifacts introduced by poor data reporting in the primary studies. This prevents us from drawing a single, definitive conclusion for F1-score. More broadly, it underscores a critical challenge for meta-research in this field: the final conclusions depend not only on what is published, but critically on the quality and completeness of the statistical reporting within those publications.
+
+### Methodological Assumptions and Limitations
+
+Our analysis is guided by several key methodological choices and assumptions, which are necessary given the nature of the available data. These decisions have important implications for interpreting the results, particularly the contrast between the findings for Accuracy and F1-Score.
+
+#### Justification for Raw Mean Difference (RMD)
+
+As all primary outcome metrics were reported on a common percentage scale (0-100), we selected the Raw Mean Difference (RMD) as our effect size. This choice prioritizes direct interpretability, as the results (e.g., "+5.28 points") can be understood without statistical transformation.
+
+#### Limitation: Imputation of Missing Variance
+
+A significant portion of studies reported performance as a single point estimate without a measure of variance (e.g., standard deviation). To include these studies in the primary weighted analysis, we imputed missing SDs using the pooled average from studies that did provide this information.
+
+Impact on Results: This common practice has a critical implication: imputed variances are uniform and often larger than reported variances, causing the meta-analysis to systematically down-weight these studies. As discussed in our F1-Score analysis, the heavy reliance on imputation made the final pooled estimate highly sensitive to the choice between weighted and unweighed models, directly contributing to its methodological fragility.
+
+#### Limitation: Assumption of Independent Groups
+
+The variance of the mean difference for each study was calculated under the assumption of independent groups. We acknowledge this is a simplification, as the unimodal and multimodal results from a single paper are inherently paired and thus correlated. However, as the within-study correlation (r) is almost never reported in the source literature, this assumption is a practical necessity.
+
+Impact on Results: By ignoring a likely positive correlation, our calculation systematically overestimates the true sampling variance for each study. This has two main effects: (a) it assigns less weight to each study than is optimal, and (b) it widens the confidence intervals of our final pooled estimates. Therefore, our meta-analytic results should be considered conservative estimates of the effect; the true effects may be stronger and more precise than we were able to report here.
+
+### Guidelines
+
+Guidelines for Building and Advancing Multimodal Systems.
+
+For the Practitioner
+
+1.  Analyze the Modality Relationship First. The most critical step is to understand how your modalities relate to each other for your specific task. This determines your entire architectural approach.
+
+    Action: Before building, ask: Are my modalities synergistic expressions of the same thing (e.g., emotion recognition, where voice tone and facial expression complement each other)? Or do they need to be checked for semantic incongruity (e.g., fake news, where text and image might contradict each other)? Match the Fusion Strategy to the Relationship. Our analysis shows that the optimal fusion technique is a direct consequence of the task's underlying semantic relationship.
+
+2.  Choose Simple Fusion (e.g., Concatenation) When: The modalities are synergistic and complementary. As seen in kenny2023 and braz2020, when the signals reinforce each other, a straightforward fusion is highly effective.
+
+3.  Choose Attention/Transformer-Based Fusion When: The task requires complex reasoning between modalities. As liangz2023 demonstrates, detecting subtle inconsistencies requires a mechanism that can cross-reference parts of one modality with parts of another. Build on Pre-trained Backbones as Your Foundation. The one constant across all top-performing modern systems is their reliance on large, pre-trained models.
+
+    Action: Do not train feature extractors from scratch. Your primary task is to select the best available pre-trained model for each of your modalities (e.g., BERT/XLNet for text, ViT/ConvNeXt for images, Wav2Vec for audio). Your fusion architecture's job is to be a "smart bridge" between these powerful, pre-existing feature spaces. For the Designer & Architect (Planning Future Systems): Engineer "Missing" Modalities to Augment Unimodal Problems. The paradigm-shifting lesson from braz2020 is that multimodality can be a data generation strategy, not just a modeling technique.
+
+4.  When a high-performing unimodal system begins to plateau, consider synthesizing a new modality instead of building an ever-larger architecture. For an image-only task, generate text cations. For a video-only task, generate audio transcripts or summaries. This can unlock new performance with surprising efficiency. Incorporate Specialized Vision-Language Components. State-of-the-art systems like liangz2023 are moving beyond just encoders. They are using pre-trained Vision-Language models (like BLIP, CLIP) as a distinct input to the fusion layer.
+
+5.  Design architectures that treat the output of a V-L model as a native "multimodal feature" to be fused alongside the unimodal text and image features. This provides a powerful, pre-aligned representation that can simplify the final fusion task.
+
+For the Theoretician & Researcher
+
+1.  Develop a Formal Taxonomy of Semantic Relationships. Our analysis identified "synergy" and "incongruity" on an ad-hoc basis. The next frontier is to formalize these concepts.
+
+    Action: Propose and validate a framework for classifying inter-modal relationships (e.g., Equivalence, Complementarity, Contradiction, Redundancy). Develop methods to automatically identify or quantify these relationships in a new dataset, which could help guide the choice of fusion architecture automatically.
+
+2.  Advocate for a community standard where multimodal papers must report: The performance of each unimodal baseline classifier. Results on multiple metrics, especially F1-score for imbalanced datasets. Full ablation studies, isolating the contribution of each modality and the fusion module. This level of rigor is essential for true, cumulative scientific progress.
+
+# References
+
+```{r}
+# Helper function to format authors
+format_authors <- function(authors_field) {
+  # Handle different input types
+  if (is.null(authors_field) || length(authors_field) == 0) return("")
+  
+  # If it's a list, extract the first element
+  if (is.list(authors_field)) {
+    if (length(authors_field[[1]]) == 0) return("")
+    authors_str <- authors_field[[1]]
+  } else {
+    authors_str <- authors_field
+  }
+  
+  # Handle vectors - take first non-NA element
+  if (length(authors_str) > 1) {
+    authors_str <- authors_str[1]
+  }
+  
+  # Check if it's NA or empty - handle single element only
+  if (length(authors_str) == 0 || is.na(authors_str[1]) || authors_str[1] == "") return("")
+  
+  # Convert to character if needed
+  authors_str <- as.character(authors_str[1])
+  
+  # Split authors and format as "First Initial. Last Name"
+  authors <- strsplit(authors_str, " and ")[[1]]
+  
+  formatted_authors <- sapply(authors, function(author) {
+    author <- trimws(author)  # Clean whitespace
+    
+    # Handle "Last, First" format
+    if (grepl(",", author)) {
+      parts <- strsplit(author, ",")[[1]]
+      last_name <- trimws(parts[1])
+      first_name <- trimws(parts[2])
+      
+      # Get first initial(s) - handle middle names too
+      name_parts <- strsplit(first_name, " ")[[1]]
+      initials <- sapply(name_parts, function(name) {
+        if (nchar(trimws(name)) > 0) {
+          paste0(substr(trimws(name), 1, 1), ".")
+        } else {
+          ""
+        }
+      })
+      initials <- paste(initials[initials != ""], collapse = " ")
+      
+      return(paste0(initials, " ", last_name))
+    } else {
+      # Handle "First Last" format
+      parts <- strsplit(trimws(author), " ")[[1]]
+      if (length(parts) >= 2) {
+        # First name initial(s)
+        first_parts <- parts[1:(length(parts)-1)]
+        initials <- sapply(first_parts, function(name) {
+          if (nchar(trimws(name)) > 0) {
+            paste0(substr(trimws(name), 1, 1), ".")
+          } else {
+            ""
+          }
+        })
+        initials <- paste(initials[initials != ""], collapse = " ")
+        
+        # Last name
+        last_name <- parts[length(parts)]
+        return(paste0(initials, " ", last_name))
+      }
+      return(author)  # Return as-is if can't parse
+    }
+  })
+  
+  return(paste(formatted_authors, collapse = ", "))
+}
+
+safe_extract <- function(field) {
+  if (is.null(field)) return("")
+  if (is.list(field)) {
+    if (length(field) == 0 || length(field[[1]]) == 0) return("")
+    result <- field[[1]][1]
+  } else {
+    if (length(field) == 0) return("")
+    result <- field[1]
+  }
+  
+  if (is.na(result)) return("")
+  return(as.character(result))
+}
+
+# Format journal article
+format_article <- function(authors, title, year, entry, doi) {
+  journal <- safe_extract(entry$JOURNAL)
+  volume <- safe_extract(entry$VOLUME)
+  pages <- safe_extract(entry$PAGES)
+  number <- safe_extract(entry$NUMBER)
+  
+  # Check if it's an article number format (e.g., e00205)
+  is_article_number <- pages != "" && grepl("^e[0-9]+", pages)
+  
+  if (is_article_number) {
+    # Format with article number
+    ref <- paste0(authors, ", ", year, ". ", title, ". ", journal, ". ", volume, ", ", pages, ".")
+  } else {
+    # Standard format
+    volume_info <- if (volume != "") paste0(" ", volume) else ""
+    page_info <- if (pages != "") paste0(" ", gsub("-", " – ", pages)) else ""
+    ref <- paste0(authors, ", ", title, ", ", journal, volume_info, " (", year, ")", page_info, ".")
+  }
+  
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+# Format book
+format_book <- function(authors, title, year, entry) {
+  publisher <- safe_extract(entry$PUBLISHER)
+  address <- safe_extract(entry$ADDRESS)
+  edition <- safe_extract(entry$EDITION)
+  
+  edition_text <- if (edition != "") paste0(edition, " ed., ") else ""
+  location <- if (address != "") paste0(", ", address) else ""
+  
+  ref <- paste0(authors, ", ", title, ", ", edition_text, publisher, location, ", ", year, ".")
+  return(ref)
+}
+
+# Format book chapter
+format_chapter <- function(authors, title, year, entry) {
+  booktitle <- safe_extract(entry$BOOKTITLE)
+  editor <- format_authors(entry$EDITOR)
+  publisher <- safe_extract(entry$PUBLISHER)
+  address <- safe_extract(entry$ADDRESS)
+  pages <- safe_extract(entry$PAGES)
+  
+  editor_text <- if (editor != "") paste0("in: ", editor, " (Eds.), ") else ""
+  location <- if (address != "") paste0(", ", address) else ""
+  page_info <- if (pages != "") paste0(", pp. ", gsub("-", " - ", pages)) else ""
+  
+  ref <- paste0(authors, ", ", title, ", ", editor_text, booktitle, ", ", 
+                publisher, location, ", ", year, page_info, ".")
+  return(ref)
+}
+
+# Format miscellaneous (websites, datasets)
+format_misc <- function(authors, title, year, entry, url, doi) {
+  howpublished <- safe_extract(entry$HOWPUBLISHED)
+  note <- safe_extract(entry$NOTE)
+  
+  # Detect if it's a website or dataset
+  is_dataset <- grepl("dataset|data", paste(title, howpublished, note), ignore.case = TRUE)
+  
+  if (is_dataset) {
+    ref <- paste0(authors, ", ", title, " [dataset], ", howpublished, ", ", year, ".")
+    if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  } else {
+    # Website format
+    access_info <- if (note != "") paste0(" (", note, ")") else ""
+    ref <- paste0(authors, ", ", title, ". ", url, ", ", year, access_info, ".")
+  }
+  
+  return(ref)
+}
+
+# Format software
+format_software <- function(authors, title, year, entry, doi) {
+  howpublished <- safe_extract(entry$HOWPUBLISHED)
+  version <- safe_extract(entry$VERSION)
+  note <- safe_extract(entry$NOTE)
+  
+  version_text <- if (version != "") paste0(" ", version) else ""
+  date_info <- if (note != "") paste0(", ", note) else ""
+  
+  ref <- paste0(authors, ", ", title, version_text, " [software], ", 
+                howpublished, date_info, ", ", year, ".")
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+
+# Default format
+format_default <- function(authors, title, year, entry, doi, url) {
+  ref <- paste0(authors, ", ", title, " (", year, ").")
+  if (url != "") ref <- paste0(ref, " ", url, ".")
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+format_proceedings <- function(authors, title, year, entry, doi) {
+  booktitle <- safe_extract(entry$BOOKTITLE)
+  pages <- safe_extract(entry$PAGES)
+  publisher <- safe_extract(entry$PUBLISHER)
+  address <- safe_extract(entry$ADDRESS)
+  
+  location <- if (address != "") paste0(", ", address) else ""
+  page_info <- if (pages != "") paste0(", pp. ", gsub("-", " – ", pages)) else ""
+  publisher_info <- if (publisher != "") paste0(", ", publisher) else ""
+  
+  ref <- paste0(authors, ", ", title, ", in: ", booktitle, publisher_info, 
+                location, ", ", year, page_info, ".")
+  
+  if (doi != "") ref <- paste0(ref, " ", doi, ".")
+  return(ref)
+}
+
+format_bibliography <- function(bib_df) {
+  if (is.null(bib_df) || nrow(bib_df) == 0) {
+    return("No bibliography entries found.")
+  }
+  
+  formatted_refs <- character(nrow(bib_df))
+  
+  for (i in 1:nrow(bib_df)) {
+    entry <- bib_df[i, ]
+    ref_type <- tolower(safe_extract(entry$CATEGORY))
+    
+    # Extract common fields safely
+    bibtexkey <- entry$BIBTEXKEY
+    authors <- format_authors(entry$AUTHOR)
+    title <- safe_extract(entry$TITLE)
+    year <- safe_extract(entry$YEAR)
+    doi <- safe_extract(entry$DOI)
+    if (doi != "") doi <- paste0("https://doi.org/", doi)
+    url <- safe_extract(entry$URL)
+    
+    # Format based on entry type
+    formatted_ref <- tryCatch({
+      switch(ref_type,
+        "article" = format_article(authors, title, year, entry, doi),
+        "book" = format_book(authors, title, year, entry),
+        "incollection" = ,
+        "inbook" = format_chapter(authors, title, year, entry),
+        "inproceedings" = format_proceedings(authors, title, year, entry, doi),
+        "misc" = format_misc(authors, title, year, entry, url, doi),
+        "techreport" = ,
+        "manual" = format_software(authors, title, year, entry, doi),
+        # Default format
+        format_default(authors, title, year, entry, doi, url)
+      )
+    }, error = function(e) {
+      # Fallback format if there's an error
+      paste0(authors, ", ", title, " (", year, ").")
+    })
+    
+    formatted_refs[i] <- paste0("[", i, "] ", "[", bibtexkey, "] ", formatted_ref)
+  }
+  
+  return(paste(formatted_refs, collapse = "\n\n"))
+}
+
+```
+
+```{r}
+# Load and format bibliography
+bibligraphy <- load_bibliography('./bibtex-information-fusion-document-classification.bib')
+formatted_bibliography <- format_bibliography(bibligraphy)
+cat(formatted_bibliography[1])
+```
