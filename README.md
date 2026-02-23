@@ -38,7 +38,7 @@ All statistical results, tables, and figures reported in the article can be repr
 - Required R packages specified within the scripts
 
 ## Citation
-- **Article DOI:** to be added after publication  
+- **Article DOI:** https://doi.org/10.1016/j.inffus.2026.104247  
 - **Replication package DOI:** https://doi.org/10.5281/zenodo.17141560
 
 ## Author and Affiliation
